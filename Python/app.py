@@ -57,7 +57,7 @@ class Annotator(QtWidgets.QMainWindow):
         self.setWindowTitle("Point Cloud Annotator")
         # State
         self.brush_size = 0.05
-        self.point_size = 3
+        self.point_size = 5
         self.current_color = [255,0,0]
         self.history, self.redo_stack = [], []
         self._waiting = None
@@ -367,8 +367,12 @@ class Annotator(QtWidgets.QMainWindow):
         self.original_colors = self.colors.copy()
         self.enhanced_colors = self.colors.copy()
         self.plotter.clear()
-        self.actor = self.plotter.add_points(self.cloud,scalars='RGB',rgb=True,point_size=self.point_size)
-        self.apply_view()
+        self.actor = self.plotter.add_points(
+            self.cloud, scalars='RGB', rgb=True, point_size=self.point_size, reset_camera=True
+        )
+        self.apply_view()  # set orientation first
+        self._fit_to_canvas()
+
         # send explicit (x,y) to on_click
         self.plotter.track_click_position(lambda _, x, y: self.on_click(x, y))
         # update overlays
@@ -399,11 +403,38 @@ class Annotator(QtWidgets.QMainWindow):
         self.counter_label.raise_()
         self.filename_label.raise_()
 
+    def _fit_to_canvas(self):
+        QtWidgets.QApplication.processEvents()  # ensure real widget size
+        xmin, xmax, ymin, ymax, zmin, zmax = self.cloud.bounds
+        cx, cy, cz = (xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2
+        r = 0.5 * np.linalg.norm([xmax-xmin, ymax-ymin, zmax-zmin])
+        if r <= 0: return
+
+        cam = self.plotter.camera
+        # cam.SetViewAngle(30)
+        vfov = np.deg2rad(cam.GetViewAngle())
+        w = max(1, self.plotter.interactor.width())
+        h = max(1, self.plotter.interactor.height())
+        hfov = 2*np.arctan(np.tan(vfov/2)*(w/h))
+        eff = min(vfov, hfov)                   # fit both width & height
+        dist = r / np.tan(eff/2) * 1.01         # small margin
+
+        self.apply_view()                       # keep your chosen orientation
+        dirp = np.array(cam.GetDirectionOfProjection())  # camera→focal (unit)
+        if not np.isfinite(dirp).all() or np.linalg.norm(dirp) < 1e-6:
+            dirp = np.array([0, 0, -1])
+        pos = np.array([cx, cy, cz]) - dirp*dist
+        cam.SetFocalPoint(cx, cy, cz)
+        cam.SetPosition(*pos)
+        self.plotter.reset_camera_clipping_range()
+        self.plotter.render()
+        
     def resizeEvent(self, event):
         super().resizeEvent(event)
         # always keep overlays at bottom after resize
         if hasattr(self, 'counter_label'):
             self._position_overlays()
+        QtCore.QTimer.singleShot(0, self._fit_to_canvas)
 
     def apply_view(self):
         if self.view_combo.currentText() == 'Top-Down':
@@ -648,24 +679,26 @@ class Annotator(QtWidgets.QMainWindow):
         self.current_color = None  # Special flag for erasing        
         
     def reset_contrast(self):
-        self.gamma_slider.setValue(100)
-
-        # Recompute gamma = 1.0 directly (to override auto-contrast)
-        normalized = self.original_colors.astype(np.float32) / 255.0
-        stretched = (normalized - normalized.min(axis=0, keepdims=True)) / (
-            normalized.max(axis=0, keepdims=True) - normalized.min(axis=0, keepdims=True) + 1e-5
-        )
-        self.enhanced_colors = (stretched * 255).astype(np.uint8)
-
-        current = self.colors.copy()
-        mask = np.all(current == self.original_colors, axis=1)
-        current[mask] = self.enhanced_colors[mask]
-
-        self.cloud['RGB'] = current
-        self.plotter.update_scalars('RGB', mesh=self.cloud, render=True)
-
+        # Don't fire on_gamma_change while we move the slider
+        self.gamma_slider.blockSignals(True)
+        self.gamma_slider.setValue(100)   # visual reset to gamma=1.0
+        self.gamma_slider.blockSignals(False)
         self.gamma_value_label.setText("1.00")
 
+        # "Untouched" points are ones that still equal the original colors
+        # (self.colors tracks user edits only; we never wrote enhancements into it)
+        current = self.colors.copy()
+        untouched_mask = np.all(current == self.original_colors, axis=1)
+
+        # Reset those untouched points back to original (i.e., remove any enhancement)
+        current[untouched_mask] = self.original_colors[untouched_mask]
+
+        # Keep book-keeping tidy
+        self.enhanced_colors = self.original_colors.copy()
+
+        # Push to mesh and re-render
+        self.cloud['RGB'] = current
+        self.plotter.update_scalars(current, mesh=self.cloud, render=True)
                 
     def on_gamma_change(self, val):
         gamma = 2 ** ((val - 100) / 50.0)  # nonlinear mapping
@@ -685,7 +718,7 @@ class Annotator(QtWidgets.QMainWindow):
         current[mask] = self.enhanced_colors[mask]
 
         self.cloud['RGB'] = current  # ✅ ← important!
-        self.plotter.update_scalars('RGB', mesh=self.cloud, render=True)
+        self.plotter.update_scalars(current, mesh=self.cloud, render=True)
 
     def apply_auto_contrast(self):
         # Normalize RGB to [0,1]
@@ -706,7 +739,7 @@ class Annotator(QtWidgets.QMainWindow):
         current[mask] = self.enhanced_colors[mask]
 
         self.cloud['RGB'] = current
-        self.plotter.update_scalars('RGB', mesh=self.cloud, render=True)
+        self.plotter.update_scalars(current, mesh=self.cloud, render=True)
 
         # Also update gamma label to reflect "Auto"
         self.gamma_value_label.setText("Auto")
