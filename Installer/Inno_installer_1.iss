@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Point Cloud Annotator"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "Preetham Manjunatha"
 #define MyAppURL "https://preethamam.github.io/"
 #define MyAppExeName "Point Cloud Annotator.exe"

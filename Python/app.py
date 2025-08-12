@@ -404,6 +404,10 @@ class Annotator(QtWidgets.QMainWindow):
         self.filename_label.raise_()
 
     def _fit_to_canvas(self):
+        # Bail out safely if no point cloud is loaded yet
+        if not hasattr(self, 'cloud') or self.cloud is None or self.cloud.n_points == 0:
+            return
+    
         QtWidgets.QApplication.processEvents()  # ensure real widget size
         xmin, xmax, ymin, ymax, zmin, zmax = self.cloud.bounds
         cx, cy, cz = (xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2
