@@ -22,7 +22,7 @@ Dependencies:
   pip install pyvista pyvistaqt scipy numpy PyQt5
 
 Usage:
-  python point_cloud_annotator.py
+  python app.py
 """
 import json
 import math
