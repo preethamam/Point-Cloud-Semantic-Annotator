@@ -40,7 +40,7 @@ from pyvistaqt import QtInteractor
 from scipy.spatial import cKDTree
 from scipy.stats import gaussian_kde
 from vtkmodules.vtkIOPLY import vtkPLYWriter
-from vtkmodules.vtkRenderingCore import vtkPropPicker
+from vtkmodules.vtkRenderingCore import vtkPropPicker, vtkCamera
 
 APP_NAME = "Point Cloud Annotator"
 state_dir = Path(user_data_dir(APP_NAME, appauthor=False))
@@ -56,16 +56,57 @@ class Annotator(QtWidgets.QMainWindow):
         if icon.exists(): self.setWindowIcon(QIcon(str(icon)))
         self.setWindowTitle("Point Cloud Annotator")
         # State
-        self.brush_size = 0.05
-        self.point_size = 5
+        self.brush_size = 0.08
+        self.point_size = 6
         self.current_color = [255,0,0]
         self.history, self.redo_stack = [], []
         self._waiting = None
         self.directory, self.files, self.index = None, [], 0
         self._last_gamma_value = 100  # default gamma = 1.0
+        self.ann_dir, self.orig_dir = None, None
+        self.annotations_visible = True
+        self._session_edited = None  # set per cloud: np.bool_ mask
+        self.annotation_alpha = 1.0  # 0..1
+        self.repair_mode = False  # NEW
+        self._is_closing = False
+        
+        self._shared_camera = None           # NEW: camera shared by left/right in repair
+        self._cam_observer_id = None         # NEW: observer handle for unlinking
+        self._cam_syncing = False            # NEW: re-entrancy guard
+        
+        self._batch = False
+        self._cam_pause = False      # NEW: pause camera-sync renders during loads
+
+        self._fit_pad = 1.12
+                
+        # ——— Debounced camera fitting ———
+        self._fit_delay_ms = 33  # ~2 frames at 60Hz; tweak 16–50ms if you like
+        self._fit_timer = QtCore.QTimer(self)
+        self._fit_timer.setSingleShot(True)
+        self._fit_timer.timeout.connect(self._fit_to_canvas)
+        
+        # ——— Fast painting path ———
+        self._paint_step_frac = 0.33      # denser than 0.8 to avoid gaps while staying fast
+        self._brush_coverage  = 1.25    # 15% inflation to guarantee full coverage
+        self._last_paint_xy   = None
+        self._in_stroke       = False
+
+        self._stroke_render_timer = QtCore.QTimer(self)
+        self._stroke_render_timer.setSingleShot(True)
+        self._stroke_render_timer.timeout.connect(self._render_views_once)
+        
+        # ——— Paint throttling (limit to ~120 FPS) ———
+        self._paint_timer = QtCore.QElapsedTimer()
+        self._paint_timer.start()
+        self._min_paint_ms = 8   # ~8 ms between paint batches (~120 Hz)
+        
+        self._constrain_line = False   # Shift-drag = straight line
+        self._anchor_xy = None         # (x,y) where the line started
+        self._line_len_px = 0.0        # distance already painted along the line (pixels)
 
         # Build UI
-        self._build_ui()
+        self._build_ui()        
+            
         # allow us to catch mouse‐moves on the VTK widget
         self.plotter.interactor.setMouseTracking(True)
         self.plotter.interactor.installEventFilter(self)
@@ -74,13 +115,24 @@ class Annotator(QtWidgets.QMainWindow):
         self._colors_before_stroke    = None
         # Global shortcuts
         s = QtWidgets.QShortcut
-        s(QKeySequence(QtCore.Qt.Key_A), self, activated=lambda: self.annot_chk.toggle())
+        def _on_key_A():
+            self.annot_chk.toggle()                 # keep original behavior
+            setattr(self, '_waiting', 'alpha')      # NEW: A now targets alpha for +/-
+            
+        s(QKeySequence(QtCore.Qt.Key_A), self, activated=_on_key_A)
         s(QKeySequence('R'), self, activated=self.reset_view)
         s(QKeySequence.Undo, self, activated=self.on_undo)
         s(QKeySequence.Redo, self, activated=self.on_redo)
         s(QKeySequence(QtCore.Qt.Key_Left), self, activated=self.on_prev)
         s(QKeySequence(QtCore.Qt.Key_Right), self, activated=self.on_next)
         s(QKeySequence.Save, self, activated=self.on_save)
+        
+        
+        sc_toggle = QtWidgets.QShortcut(QKeySequence('Shift+A'), self)
+        sc_toggle.setContext(QtCore.Qt.ApplicationShortcut)   # <— important
+        sc_toggle.activated.connect(lambda: self.toggle_ann_chk.setChecked(
+            not self.toggle_ann_chk.isChecked()))
+        
         for key, mode in [('B','brush'), ('D','point')]:
             sc = QtWidgets.QShortcut(QKeySequence(key), self)
             sc.setContext(QtCore.Qt.ApplicationShortcut)
@@ -101,14 +153,25 @@ class Annotator(QtWidgets.QMainWindow):
         e_sc.setContext(QtCore.Qt.ApplicationShortcut)
         e_sc.activated.connect(self.activate_eraser)
         
+        sc_repair = QtWidgets.QShortcut(QKeySequence('Shift+R'), self)     # NEW
+        sc_repair.setContext(QtCore.Qt.ApplicationShortcut)                # NEW
+        sc_repair.activated.connect(lambda: self.repair_btn.toggle())
+
         # Restore state
         if STATE_FILE.exists():
             try:
                 st = json.loads(STATE_FILE.read_text())
-                self.directory = Path(st.get('directory',''))
-                # grab all point-cloud files and do one natural sort
-                self.files = self._get_sorted_files()
-                self.index = max(0, min(len(self.files)-1, st.get('index',0)))
+                ann = st.get('annotation_dir', '')
+                org = st.get('original_dir', '')
+                self.ann_dir = Path(ann) if ann else None
+                self.orig_dir = Path(org) if org else None
+                self.index = max(0, st.get('index', 0))
+                # list files from the annotation folder only
+                if self.ann_dir:
+                    self.directory = self.ann_dir  # keep old name if you use it elsewhere
+                    self.files = self._get_sorted_files()
+                else:
+                    self.directory, self.files = None, []
             except:
                 pass
         # Show and load
@@ -130,65 +193,139 @@ class Annotator(QtWidgets.QMainWindow):
 
     def _compute_brush_idx(self, x, y):
         """
-        Return indices of all points whose 2D screen projection
-        lies within r_px pixels of (x,y), skipping voids.
+        Exact WYSIWYG: points are rendered as round sprites (radius s_px).
+        Paint a point only if its sprite fits fully inside the brush circle:
+            ||center - cursor|| <= r_px - s_px
+        Fallback to circle–circle intersection when r_px <= s_px (tiny brushes).
         """
+        if not hasattr(self, 'kdtree') or self.kdtree is None or not hasattr(self, 'actor'):
+            return []
+
+        ren   = self.plotter.renderer
+        inter = self.plotter.interactor
+        H     = inter.height()
+
+        from vtkmodules.vtkRenderingCore import vtkPropPicker
         picker = vtkPropPicker()
-        picker.PickFromListOn()
-        picker.AddPickList(self.actor)
-
-        ren  = self.plotter.renderer
-        h    = self.plotter.interactor.height()
-        r_px = self.brush_slider.value()
-
-        # 1) pick center; abort if no hit
-        if not picker.Pick(x, h - y, 0, ren):
+        if not picker.Pick(x, H - y, 0, ren):
             return []
-        pt_center = np.array(picker.GetPickPosition())
-
-        # 2) sample 8 edge directions to estimate world-space radius
-        world_radii = []
-        # sample at one step per pixel on your brush circumference, 
-        # but at least 32 samples for small brushes:
-        r_px = self.brush_slider.value()
-        n_samples = min(360, max(32, int(2 * math.pi * r_px))) #max(32, int(2 * math.pi * r_px))
-
-        for angle in np.linspace(0, 2*math.pi, n_samples, endpoint=False):
-            dx = r_px * math.cos(angle)
-            dy = r_px * math.sin(angle)
-            if picker.Pick(int(x + dx), int(h - (y + dy)), 0, ren):
-                pt_edge = np.array(picker.GetPickPosition())
-                world_radii.append(np.linalg.norm(pt_edge - pt_center))
-
-        # if nothing at any edge, fall back to brush_size in world units
-        world_r = max(world_radii) if world_radii else self.brush_size
-
-        # 3) KD-tree superset
-        candidates = self.kdtree.query_ball_point(pt_center, world_r)
-        if not candidates:
+        wc = np.array(picker.GetPickPosition(), dtype=float)
+        if not np.isfinite(wc).all():
             return []
 
-        # 4) final screen‐space filter
-        valid = []
-        for i in candidates:
-            wx, wy, wz = self.cloud.points[i]
-            ren.SetWorldPoint(wx, wy, wz, 1.0)
-            ren.WorldToDisplay()
-            dx_disp, dy_disp, _ = ren.GetDisplayPoint()
-            # Qt y → VTK display y
-            dy_vtk = h - y
-            if (dx_disp - x)**2 + (dy_disp - dy_vtk)**2 <= r_px**2:
-                valid.append(i)
+        # Stable display depth at brush center
+        ren.SetWorldPoint(wc[0], wc[1], wc[2], 1.0); ren.WorldToDisplay()
+        xd, yd, zd = ren.GetDisplayPoint()
 
-        return valid
+        # World size of one display pixel at this depth
+        ren.SetDisplayPoint(xd + 1.0, yd, zd); ren.DisplayToWorld()
+        wx1, wy1, wz1, _ = ren.GetWorldPoint()
+        ren.SetDisplayPoint(xd, yd + 1.0, zd); ren.DisplayToWorld()
+        wx2, wy2, wz2, _ = ren.GetWorldPoint()
+        px_world = max(
+            float(np.linalg.norm(np.array([wx1, wy1, wz1]) - wc)),
+            float(np.linalg.norm(np.array([wx2, wy2, wz2]) - wc)),
+        )
+
+        # Brush & sprite geometry (display pixels)
+        r_px = float(max(1, self.brush_slider.value()))          # brush radius (px)
+        s_px = 0.5 * float(max(1, self.point_slider.value()))    # round sprite radius (px)
+
+        # Loose world preselect (brush + sprite), slight inflation for safety
+        inflate = float(getattr(self, "_brush_coverage", 1.15))
+        world_r = max(1e-9, (r_px + s_px) * px_world * inflate)
+        cand    = self.kdtree.query_ball_point(wc, world_r)
+        if not cand:
+            return []
+
+        # Screen-space refine
+        cx, cy = float(x), float(H - y)
+        keep   = []
+        SetWorldPoint   = ren.SetWorldPoint
+        WorldToDisplay  = ren.WorldToDisplay
+        GetDisplayPoint = ren.GetDisplayPoint
+        pts = self.cloud.points
+
+        r_in = r_px - s_px
+        if r_in > 0.5:
+            r2_in = r_in * r_in
+            for i in cand:
+                wx, wy, wz = pts[i]
+                SetWorldPoint(wx, wy, wz, 1.0); WorldToDisplay()
+                dx, dy, _ = GetDisplayPoint()
+                if (dx - cx)*(dx - cx) + (dy - cy)*(dy - cy) <= r2_in:
+                    keep.append(i)
+        else:
+            # Tiny brushes: allow circle–circle INTERSECTION so you can still paint
+            r2_sum = (r_px + s_px) * (r_px + s_px)
+            for i in cand:
+                wx, wy, wz = pts[i]
+                SetWorldPoint(wx, wy, wz, 1.0); WorldToDisplay()
+                dx, dy, _ = GetDisplayPoint()
+                if (dx - cx)*(dx - cx) + (dy - cy)*(dy - cy) <= r2_sum:
+                    keep.append(i)
+
+        return keep
+
+    def _snap_camera(self, plotter):
+        cam = plotter.camera
+        try:
+            return dict(
+                pos=np.array(cam.GetPosition(), dtype=float),
+                fp=np.array(cam.GetFocalPoint(), dtype=float),
+                vu=np.array(cam.GetViewUp(), dtype=float),
+                pp=bool(cam.GetParallelProjection()),
+                ps=float(cam.GetParallelScale()),
+                va=float(cam.GetViewAngle()),
+            )
+        except Exception:
+            return None
+
+    def _restore_camera(self, plotter, snap):
+        if not snap:
+            return
+        cam = plotter.camera
+        cam.SetPosition(*snap['pos'])
+        cam.SetFocalPoint(*snap['fp'])
+        cam.SetViewUp(*snap['vu'])
+        if snap['pp']:
+            cam.ParallelProjectionOn()
+            cam.SetParallelScale(snap['ps'])
+        else:
+            cam.ParallelProjectionOff()
+            cam.SetViewAngle(snap['va'])
+
 
     def _build_ui(self):
         w = QtWidgets.QWidget(); self.setCentralWidget(w)
         lay = QtWidgets.QHBoxLayout(w)
         # 3D viewport
         self.plotter = QtInteractor(self)
+        self.plotter_ref = QtInteractor(self)      
+        
+        # Anti-alias points/lines (8x MSAA)
+        try:
+            self.plotter.ren_win.SetMultiSamples(8)
+        except Exception:
+            pass
+        try:
+            self.plotter_ref.ren_win.SetMultiSamples(8)
+        except Exception:
+            pass
+
+        # Title/overlay for RIGHT (Original) panel  — NEW
+        self.right_title = QtWidgets.QLabel(self.plotter_ref.interactor)  # NEW
+        self.right_title.setAutoFillBackground(True)                      # NEW
+        self.right_title.setStyleSheet('color:black; font-weight:bold; background-color:white; font-size:14px;')  # NEW
+        self.right_title.setText('Original Point Cloud')                           # NEW
+        self.right_title.hide()    
+        self.plotter_ref.set_background('white')               # NEW
+        self.plotter_ref.setVisible(False)                     # NEW
+        lay.addWidget(self.plotter_ref.interactor, stretch=4)
+        
         self.plotter.set_background('white')  # light gray background [0.961, 0.961, 0.961, 1.0]
         lay.addWidget(self.plotter.interactor, stretch=4)
+        
         # Overlays
         self.counter_label = QtWidgets.QLabel(self.plotter.interactor)
         # make background fully opaque to clear old text
@@ -203,11 +340,44 @@ class Annotator(QtWidgets.QMainWindow):
         self.filename_label.show()
         # Controls panel
         ctrl = QtWidgets.QVBoxLayout(); lay.addLayout(ctrl,stretch=1)
-        self.open_btn = QtWidgets.QPushButton('Open Folder'); self.open_btn.clicked.connect(self.open_folder)
-        ctrl.addWidget(self.open_btn)
-        self.annot_chk = QtWidgets.QCheckBox('Annotation Mode (A)'); self.annot_chk.stateChanged.connect(self.toggle_annotation)
-        ctrl.addWidget(self.annot_chk)
         
+        folder_row = QtWidgets.QHBoxLayout()
+        self.open_ann_btn  = QtWidgets.QPushButton('Open Annotation PC Folder')
+        self.open_orig_btn = QtWidgets.QPushButton('Open Original PC Folder')
+        self.open_ann_btn.clicked.connect(self.open_ann_folder)
+        self.open_orig_btn.clicked.connect(self.open_orig_folder)
+        folder_row.addWidget(self.open_ann_btn)
+        folder_row.addWidget(self.open_orig_btn)
+        ctrl.addLayout(folder_row)
+        
+        line0 = QtWidgets.QFrame()
+        line0.setFrameShape(QtWidgets.QFrame.HLine)
+        line0.setFrameShadow(QtWidgets.QFrame.Sunken)
+        ctrl.addWidget(line0)
+        
+        
+        annot_row = QtWidgets.QHBoxLayout()
+        self.annot_chk = QtWidgets.QCheckBox('Annotation Mode (A)')
+        self.annot_chk.stateChanged.connect(self.toggle_annotation)
+        annot_row.addWidget(self.annot_chk)
+
+        self.toggle_ann_chk = QtWidgets.QCheckBox('Toggle Annotations (Shift+A)')
+        self.toggle_ann_chk.setChecked(True)
+        self.toggle_ann_chk.stateChanged.connect(self._on_toggle_ann_changed)  # <— new slot
+        annot_row.addWidget(self.toggle_ann_chk)
+
+        annot_row.addStretch(1)
+        ctrl.addLayout(annot_row)
+        
+        alpha_row = QtWidgets.QHBoxLayout()
+        alpha_row.addWidget(QtWidgets.QLabel('Annotations Alpha (A +/-):'))
+        self.alpha_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)     # NEW
+        self.alpha_slider.setRange(0, 100)                              # NEW
+        self.alpha_slider.setValue(int(self.annotation_alpha * 100))    # NEW
+        self.alpha_slider.valueChanged.connect(self.on_alpha_change)    # NEW
+        alpha_row.addWidget(self.alpha_slider)
+        ctrl.addLayout(alpha_row)
+
         line1 = QtWidgets.QFrame()
         line1.setFrameShape(QtWidgets.QFrame.HLine)
         line1.setFrameShadow(QtWidgets.QFrame.Sunken)
@@ -332,6 +502,10 @@ class Annotator(QtWidgets.QMainWindow):
         self.undo_btn = QtWidgets.QPushButton('Undo (Ctrl+Z)')
         self.redo_btn = QtWidgets.QPushButton('Redo (Ctrl+Y)')
         self.eraser_btn.setText('Eraser (E)')  # reuse existing button
+        
+        self.repair_btn = QtWidgets.QPushButton('Repair (Shift+R)')  # NEW
+        self.repair_btn.setCheckable(True)                           # NEW
+        self.repair_btn.toggled.connect(self.toggle_repair_mode)     # NEW
 
         self.undo_btn.clicked.connect(self.on_undo)
         self.redo_btn.clicked.connect(self.on_redo)
@@ -339,39 +513,94 @@ class Annotator(QtWidgets.QMainWindow):
         ur.addWidget(self.undo_btn)
         ur.addWidget(self.redo_btn)
         ur.addWidget(self.eraser_btn)
+        ur.addWidget(self.repair_btn)
+        
         nav = QtWidgets.QHBoxLayout(); bp.addLayout(nav)
         self.prev_btn = QtWidgets.QPushButton('Previous'); self.next_btn = QtWidgets.QPushButton('Next'); self.prev_btn.clicked.connect(self.on_prev); self.next_btn.clicked.connect(self.on_next); nav.addWidget(self.prev_btn); nav.addWidget(self.next_btn)
         self.save_btn = QtWidgets.QPushButton('Save (Ctrl+S)'); self.save_btn.clicked.connect(self.on_save); bp.addWidget(self.save_btn)
-        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn]: w.setEnabled(False)
-        
+        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.alpha_slider,self.repair_btn]: w.setEnabled(False)
+
 
     def _enable_controls(self):
-        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn,self.eraser_btn,self.gamma_slider,self.reset_contrast_btn,self.auto_contrast_btn,self.hist_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn]: w.setEnabled(True)
+        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn,self.eraser_btn,self.gamma_slider,self.reset_contrast_btn,self.auto_contrast_btn,self.hist_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.open_ann_btn, self.open_orig_btn,self.alpha_slider,self.repair_btn]: w.setEnabled(True)
 
-    def open_folder(self):
-        fol = QtWidgets.QFileDialog.getExistingDirectory(self,'Select Folder')
+    def open_ann_folder(self):
+        fol = QtWidgets.QFileDialog.getExistingDirectory(self, 'Select Annotation PC Folder')
         if not fol: return
-        self.directory = Path(fol)
-        # grab all point-cloud files and do one natural sort
+        self.ann_dir = Path(fol)
+        self.directory = self.ann_dir
         self.files = self._get_sorted_files()
         if not self.files:
-            QtWidgets.QMessageBox.critical(self,'Error','No PLY/PCD'); return
+            QtWidgets.QMessageBox.critical(self, 'Error', 'No PLY/PCD in Annotation folder'); return
         self.index, self.history, self.redo_stack = 0, [], []
         self._enable_controls()
         self.load_cloud()
 
+    def open_orig_folder(self):
+        fol = QtWidgets.QFileDialog.getExistingDirectory(self, 'Select Original PC Folder')
+        if not fol: return
+        self.orig_dir = Path(fol)
+        # Persist immediately if you like
+        self._save_state()
+        # If an annotated file is already showing, reload so toggle works now
+        if self.files:
+            self.load_cloud()
+
     def load_cloud(self):
         pc = pv.read(str(self.files[self.index]))
-        if 'RGB' not in pc.array_names: pc['RGB'] = np.zeros((pc.n_points,3),dtype=np.uint8)
-        self.cloud, self.colors, self.kdtree = pc, pc['RGB'], cKDTree(pc.points)
+        self._begin_batch()
+        if 'RGB' not in pc.array_names:
+            pc['RGB'] = np.zeros((pc.n_points, 3), dtype=np.uint8)
+
+        self.cloud = pc
+
+        # Keep annotated layer as a SEPARATE numpy array (don’t point at mesh array)
+        self.colors = pc['RGB'].copy()  # annotated colors currently in the file
+
+        # Load pristine original if present; otherwise fall back to annotated
         self.original_colors = self.colors.copy()
-        self.enhanced_colors = self.colors.copy()
+        if self.orig_dir:
+            cand = self.orig_dir / Path(self.files[self.index]).name
+            if cand.exists():
+                pc0 = pv.read(str(cand))
+                if 'RGB' in pc0.array_names and pc0.n_points == pc.n_points:
+                    self.original_colors = pc0['RGB'].copy()
+
+        # Build KD-tree once
+        self.kdtree = cKDTree(pc.points)
+
+        # Enhanced/base starts from ORIGINAL (not annotated)
+        self.enhanced_colors = self.original_colors.copy()
+
+        # Initialize the mesh scalars to the current base so the first frame is correct
+        self.cloud['RGB'] = self.enhanced_colors.astype(np.uint8)
+
+        # Pre-fit the left view so the first frame is already centered and near-final
+        self._pre_fit_camera(self.cloud, self.plotter)
         self.plotter.clear()
         self.actor = self.plotter.add_points(
-            self.cloud, scalars='RGB', rgb=True, point_size=self.point_size, reset_camera=True
+            self.cloud, scalars='RGB', rgb=True, point_size=self.point_size, reset_camera=False,   # ensure False
+            render_points_as_spheres=True
         )
-        self.apply_view()  # set orientation first
-        self._fit_to_canvas()
+        # RIGHT reference view (always RAW ORIGINAL, no contrast) — REPLACE
+        self.plotter_ref.clear()
+
+        ref_colors = self.original_colors.astype(np.uint8)          # ← raw original
+        self.cloud_ref = pv.PolyData(self.cloud.points.copy())      # separate mesh
+        self.cloud_ref['RGB'] = ref_colors
+
+        self.actor_ref = self.plotter_ref.add_points(
+            self.cloud_ref, scalars='RGB', rgb=True,
+            point_size=self.point_size, reset_camera=False,          # ← no auto reset
+            render_points_as_spheres=True
+        )
+
+        # Set orientation ONCE; actual fit is deferred by _end_batch() → _finalize_layout()
+        self.apply_view()
+        if self.view_combo.currentText() == 'Top-Down':
+            self.plotter_ref.view_xy()
+        else:
+            self.plotter_ref.view_isometric()
 
         # send explicit (x,y) to on_click
         self.plotter.track_click_position(lambda _, x, y: self.on_click(x, y))
@@ -387,64 +616,175 @@ class Annotator(QtWidgets.QMainWindow):
         self.gamma_slider.setValue(100)
         self.enhanced_colors = self.original_colors.copy()
 
-        current = self.colors.copy()
-        mask = np.all(current == self.original_colors, axis=1)
-        current[mask] = self.enhanced_colors[mask]
-        self.plotter.update_scalars(current, mesh=self.cloud, render=True)
+        self._session_edited = np.zeros(self.cloud.n_points, dtype=bool)
+        has_any_edit_now = np.any(self.colors != self.original_colors)
+        self.toggle_ann_chk.setEnabled(has_any_edit_now)
+        
+        self.annotations_visible = getattr(self, 'toggle_ann_chk', None) is None or self.toggle_ann_chk.isChecked()
+        self.update_annotation_visibility()
+        self._save_state()
+        self._end_batch()
 
-        json.dump({'directory':str(self.directory),'index':self.index}, STATE_FILE.open('w'))
+    def _save_state(self):
+        json.dump({
+            'annotation_dir': str(self.ann_dir or ''),
+            'original_dir':   str(self.orig_dir or ''),
+            'index':          self.index
+        }, STATE_FILE.open('w'))
 
     def _position_overlays(self):
-        h, w = self.plotter.interactor.height(), self.plotter.interactor.width()
-        # bottom-left counter
-        self.counter_label.move(10, h - self.counter_label.height() - 10)
-        # bottom-center filename
-        self.filename_label.move((w - self.filename_label.width()) // 2, h - self.filename_label.height() - 10)
-        self.counter_label.raise_()
-        self.filename_label.raise_()
+        # LEFT (annotated) overlays
+        if hasattr(self, 'counter_label') and hasattr(self, 'plotter'):
+            h1 = self.plotter.interactor.height()
+            w1 = self.plotter.interactor.width()
+            self.counter_label.move(10, h1 - self.counter_label.height() - 10)
+            self.filename_label.move((w1 - self.filename_label.width()) // 2,
+                                    h1 - self.filename_label.height() - 10)
+            self.counter_label.raise_()
+            self.filename_label.raise_()
+
+        # RIGHT (original) label
+        if hasattr(self, 'right_title') and hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
+            h2 = self.plotter_ref.interactor.height()
+            w2 = self.plotter_ref.interactor.width()
+            self.right_title.adjustSize()
+            self.right_title.move((w2 - self.right_title.width()) // 2,
+                                h2 - self.right_title.height() - 10)
+            self.right_title.raise_()
+
+    def _fit_view(self, plotter):
+        """Fit camera of a given plotter to its mesh bounds without changing orientation.
+        Supports both perspective and parallel (orthographic) projections cleanly.
+        """
+        if getattr(self, '_is_closing', False) or getattr(self, '_batch', False):
+            return
+        if plotter is None or plotter.renderer is None:
+            return
+
+        # detect which mesh this plotter shows
+        mesh = None
+        if plotter is self.plotter and hasattr(self, 'cloud'):
+            mesh = self.cloud
+        elif plotter is self.plotter_ref and hasattr(self, 'cloud_ref'):
+            mesh = self.cloud_ref
+        if mesh is None or mesh.n_points == 0:
+            return
+
+        QtWidgets.QApplication.processEvents()
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+        cx, cy, cz = (xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2
+        xr, yr, zr = (xmax - xmin), (ymax - ymin), (zmax - zmin)
+        r = 0.5 * np.linalg.norm([xr, yr, zr])
+        if r <= 0:
+            return
+
+        cam = plotter.camera
+        w = max(1, plotter.interactor.width())
+        h = max(1, plotter.interactor.height())
+        aspect = w / float(h)
+
+        # Keep current orientation (no re-view); compute distance/scale only
+        dirp = np.array(cam.GetDirectionOfProjection(), dtype=float)
+        if not np.isfinite(dirp).all() or np.linalg.norm(dirp) < 1e-6:
+            dirp = np.array([0, 0, -1]) if self.view_combo.currentText() == 'Top-Down' else np.array([1, 1, -1])
+        dirp /= np.linalg.norm(dirp)
+
+        if cam.GetParallelProjection():
+            # In orthographic, ParallelScale is half the visible height at the focal plane.
+            # Fit both width and height considering aspect.
+            half_h = 0.5 * yr
+            half_w = 0.5 * xr
+            # To fit width, height must be >= half_w / aspect
+            scale_needed = max(half_h, half_w / max(aspect, 1e-6))
+            cam.SetFocalPoint(cx, cy, cz)
+            # Keep current camera distance (irrelevant for parallel), but ensure position isn’t NaN
+            pos = np.array(cam.GetPosition(), dtype=float)
+            if not np.isfinite(pos).all():
+                pos = np.array([cx, cy, cz]) - dirp * (r * 2.0 + 1.0)
+            cam.SetPosition(*pos)
+            cam.SetParallelScale(scale_needed * self._fit_pad)
+        else:
+            # Perspective: use view angle + widget aspect to compute distance
+            vfov = np.deg2rad(cam.GetViewAngle())
+            hfov = 2 * np.arctan(np.tan(vfov / 2) * aspect)
+            eff = min(vfov, hfov)
+            dist = r / np.tan(eff / 2) * self._fit_pad
+            pos = np.array([cx, cy, cz]) - dirp * dist
+            cam.SetFocalPoint(cx, cy, cz)
+            cam.SetPosition(*pos)
+
+        plotter.reset_camera_clipping_range()
+        if not getattr(self, '_is_closing', False) and not getattr(self, '_batch', False):
+            plotter.render()
 
     def _fit_to_canvas(self):
-        # Bail out safely if no point cloud is loaded yet
-        if not hasattr(self, 'cloud') or self.cloud is None or self.cloud.n_points == 0:
+        if getattr(self, '_is_closing', False) or getattr(self, '_batch', False):
             return
-    
-        QtWidgets.QApplication.processEvents()  # ensure real widget size
-        xmin, xmax, ymin, ymax, zmin, zmax = self.cloud.bounds
-        cx, cy, cz = (xmin+xmax)/2, (ymin+ymax)/2, (zmin+zmax)/2
-        r = 0.5 * np.linalg.norm([xmax-xmin, ymax-ymin, zmax-zmin])
-        if r <= 0: return
+        # Fit left (annotated)
+        if hasattr(self, 'plotter'):
+            self._fit_view(self.plotter)
+        # Fit right (original) when visible
+        if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
+            self._fit_view(self.plotter_ref)            
 
-        cam = self.plotter.camera
-        # cam.SetViewAngle(30)
-        vfov = np.deg2rad(cam.GetViewAngle())
-        w = max(1, self.plotter.interactor.width())
-        h = max(1, self.plotter.interactor.height())
-        hfov = 2*np.arctan(np.tan(vfov/2)*(w/h))
-        eff = min(vfov, hfov)                   # fit both width & height
-        dist = r / np.tan(eff/2) * 1.01         # small margin
-
-        self.apply_view()                       # keep your chosen orientation
-        dirp = np.array(cam.GetDirectionOfProjection())  # camera→focal (unit)
-        if not np.isfinite(dirp).all() or np.linalg.norm(dirp) < 1e-6:
-            dirp = np.array([0, 0, -1])
-        pos = np.array([cx, cy, cz]) - dirp*dist
-        cam.SetFocalPoint(cx, cy, cz)
-        cam.SetPosition(*pos)
-        self.plotter.reset_camera_clipping_range()
-        self.plotter.render()
-        
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # always keep overlays at bottom after resize
         if hasattr(self, 'counter_label'):
             self._position_overlays()
-        QtCore.QTimer.singleShot(0, self._fit_to_canvas)
+        if not getattr(self, '_batch', False):
+            self._schedule_fit()  # coalesce multiple resize fits
 
     def apply_view(self):
-        if self.view_combo.currentText() == 'Top-Down':
-            self.plotter.view_xy()
-        else:
-            self.plotter.view_isometric()
+        """
+        Top-Down  -> orthographic, look straight down +Z with +Y up.
+        Isometric -> perspective, SOUTH-WEST isometric (from -X,-Y, +Z) with Z up.
+        We set orientation explicitly for both panes, then defer the fit.
+        """
+        topdown = (self.view_combo.currentText() == 'Top-Down')
+
+        def _apply(plotter, mesh, topdown: bool):
+            if plotter is None or mesh is None or mesh.n_points == 0:
+                return
+            cam = plotter.camera
+            xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+            cx, cy, cz = (xmin + xmax) / 2.0, (ymin + ymax) / 2.0, (zmin + zmax) / 2.0
+
+            if topdown:
+                # Orthographic straight-down
+                cam.ParallelProjectionOn()
+                cam.SetViewUp(0, 1, 0)             # keep text/UI upright
+                dop = np.array([0.0, 0.0, -1.0])   # look down +Z
+            else:
+                # SOUTH-WEST isometric: from (-X, -Y, +Z) toward center
+                cam.ParallelProjectionOff()
+                cam.SetViewUp(0, 0, 1)             # Z up
+                dop = np.array([1.0, 1.0, -1.0])   # direction-of-projection (to center)
+                dop /= np.linalg.norm(dop)
+
+            cam.SetFocalPoint(cx, cy, cz)
+
+            # Rough position; final distance is set by _fit_view later (we just set orientation)
+            r = 0.5 * np.linalg.norm([xmax - xmin, ymax - ymin, zmax - zmin]) or 1.0
+            w = max(1, plotter.interactor.width()); h = max(1, plotter.interactor.height())
+            vfov = np.deg2rad(cam.GetViewAngle())
+            hfov = 2*np.arctan(np.tan(vfov/2) * (w/float(h)))
+            eff = min(vfov, hfov)
+            dist = r / np.tan(max(eff, 1e-3)/2) * float(getattr(self, '_fit_pad', 1.12))
+            pos = np.array([cx, cy, cz]) - dop * dist
+            cam.SetPosition(*pos)
+
+            plotter.reset_camera_clipping_range()
+
+        # Left (annotated)
+        _apply(self.plotter, getattr(self, 'cloud', None), topdown)
+
+        # Right (original)
+        if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
+            _apply(self.plotter_ref, getattr(self, 'cloud_ref', None), topdown)
+
+        # Defer the actual fit so it uses final widget sizes
+        self._schedule_fit()
+
 
     def reset_view(self):
         self.plotter.reset_camera()
@@ -458,19 +798,35 @@ class Annotator(QtWidgets.QMainWindow):
             self.plotter.interactor.unsetCursor()
 
     def update_cursor(self):
-        r = self.brush_slider.value()
-        d = r * 2
+        """
+        Cursor ring shows the exact paint footprint when using the strict brush:
+        effective radius = brush_radius_px - 0.5 * point_size_px.
+        """
+        # Brush & sprite sizes in display pixels
+        r_px  = max(1, int(self.brush_slider.value()))    # brush radius (px)
+        ps_px = max(1, int(self.point_slider.value()))    # rendered point size (px)
+
+        # Strict footprint (never paints outside the ring)
+        r_eff = int(round(max(1.0, r_px - 0.5 * ps_px)))
+        d     = 2 * r_eff
+
+        # Make a transparent pixmap a bit larger to avoid stroke clipping
         pix = QPixmap(d + 4, d + 4)
         pix.fill(QtCore.Qt.transparent)
+
         p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
         pen = p.pen()
-        pen.setColor(QColor(255, 0, 255))
-        pen.setWidth(3)
+        pen.setColor(QColor(255, 0, 255))  # magenta
+        pen.setWidth(2)
         p.setPen(pen)
         p.setBrush(QtCore.Qt.NoBrush)
         p.drawEllipse(2, 2, d, d)
         p.end()
-        self.plotter.interactor.setCursor(QCursor(pix, r + 2, r + 2))
+
+        # Hotspot at the center of the ring
+        self.plotter.interactor.setCursor(QCursor(pix, r_eff + 2, r_eff + 2))
+
 
     def change_brush(self, val):
         v = max(1, min(val, 200))
@@ -480,12 +836,36 @@ class Annotator(QtWidgets.QMainWindow):
             self.update_cursor()
 
     def change_point(self, val):
-        v = max(1, min(val, 20))
+        """Update rendered point size and keep 'round points' sticky."""
+        v = max(1, min(int(val), 20))
         self.point_size = v
         self.point_slider.setValue(v)
-        if hasattr(self, 'actor'):
-            self.actor.GetProperty().SetPointSize(v)
-            self.plotter.render()
+
+        def _apply_point_size(actor, render_fn):
+            try:
+                prop = actor.GetProperty()
+                prop.SetPointSize(v)
+                # keep round sprites ON even after size changes (sticky)
+                try:
+                    prop.SetRenderPointsAsSpheres(True)
+                except Exception:
+                    # older VTK may not have this setter; ignore gracefully
+                    pass
+                if not getattr(self, '_is_closing', False) and not getattr(self, '_batch', False):
+                    render_fn()
+            except Exception:
+                pass
+
+        if hasattr(self, 'actor') and self.actor is not None:
+            _apply_point_size(self.actor, self.plotter.render)
+
+        if hasattr(self, 'actor_ref') and self.actor_ref is not None:
+            _apply_point_size(self.actor_ref, self.plotter_ref.render)
+
+        # Cursor ring depends on point size in strict brush mode — keep it in sync
+        if self.annot_chk.isChecked():
+            self.update_cursor()
+
 
     def pick_color(self):
         c = QtWidgets.QColorDialog.getColor()
@@ -527,12 +907,20 @@ class Annotator(QtWidgets.QMainWindow):
         self.history.append((idx, old))
         self.redo_stack.clear()
         # apply new color
-        if self.current_color is None:
+        if self.repair_mode:
+            # Repair = copy ORIGINAL back into annotated layer
             self.colors[idx] = self.original_colors[idx]
         else:
-            self.colors[idx] = self.current_color
+            if self.current_color is None:
+                self.colors[idx] = self.original_colors[idx]
+            else:
+                self.colors[idx] = self.current_color
+        
+        self._session_edited[idx] = True
+        self.toggle_ann_chk.setEnabled(np.any(self._session_edited)) 
+        
         # push update back into the plot
-        self.plotter.update_scalars(self.colors, mesh=self.cloud, render=True)
+        self.update_annotation_visibility()
 
 
     def on_prev(self):
@@ -541,6 +929,7 @@ class Annotator(QtWidgets.QMainWindow):
             self.history.clear()
             self.redo_stack.clear()
             self.load_cloud()
+            self._position_overlays()
 
     def on_next(self):
         if self.index < len(self.files) - 1:
@@ -548,6 +937,7 @@ class Annotator(QtWidgets.QMainWindow):
             self.history.clear()
             self.redo_stack.clear()
             self.load_cloud()
+            self._position_overlays()
 
     def on_undo(self):
         if not self.history:
@@ -555,7 +945,9 @@ class Annotator(QtWidgets.QMainWindow):
         idx, old = self.history.pop()
         self.redo_stack.append((idx, self.colors[idx].copy()))
         self.colors[idx] = old
-        self.plotter.update_scalars(self.colors, mesh=self.cloud, render=True)
+        self._session_edited[idx] = False
+        self.toggle_ann_chk.setEnabled(np.any(self._session_edited))
+        self.update_annotation_visibility()
 
     def on_redo(self):
         if not self.redo_stack:
@@ -563,7 +955,9 @@ class Annotator(QtWidgets.QMainWindow):
         idx, cols = self.redo_stack.pop()
         self.history.append((idx, self.colors[idx].copy()))
         self.colors[idx] = cols
-        self.plotter.update_scalars(self.colors, mesh=self.cloud, render=True)
+        self._session_edited[idx] = True
+        self.toggle_ann_chk.setEnabled(np.any(self._session_edited))
+        self.update_annotation_visibility()
 
     def on_save(self):
         out = Path(self.files[self.index])
@@ -615,6 +1009,8 @@ class Annotator(QtWidgets.QMainWindow):
         elif self._waiting == 'zoom':
             self.plotter.camera.Zoom(1.1)
             self.plotter.render()
+        elif self._waiting == 'alpha':                                  # NEW
+            self.alpha_slider.setValue(min(100, self.alpha_slider.value() + 5))  # NEW
 
     def _on_minus(self):
         if self._waiting == 'brush':
@@ -624,6 +1020,8 @@ class Annotator(QtWidgets.QMainWindow):
         elif self._waiting == 'zoom':
             self.plotter.camera.Zoom(0.9)
             self.plotter.render()
+        elif self._waiting == 'alpha':                                  # NEW
+            self.alpha_slider.setValue(max(0, self.alpha_slider.value() - 5))  # NEW
 
     def on_zoom_in(self):
         # behave exactly like “Z +”
@@ -639,42 +1037,141 @@ class Annotator(QtWidgets.QMainWindow):
         super().keyPressEvent(e)
         
     def eventFilter(self, obj, event):
+        if getattr(self, '_is_closing', False):
+            return
+
         if obj is self.plotter.interactor and self.annot_chk.isChecked():
             # 1) start stroke on LeftButtonPress
             if event.type() == QtCore.QEvent.MouseButtonPress \
             and event.button() == QtCore.Qt.LeftButton:
                 self._stroke_active        = True
+                self._in_stroke            = True
                 self._stroke_idxs.clear()
                 self._colors_before_stroke = self.colors.copy()
-                return True     # consume this event
+
+                x0, y0 = event.x(), event.y()
+                self._last_paint_xy        = (x0, y0)
+
+                # Shift = constrain to a straight line from the anchor
+                self._constrain_line = bool(event.modifiers() & QtCore.Qt.ShiftModifier)
+                if self._constrain_line:
+                    self._anchor_xy   = (x0, y0)
+                    self._line_len_px = 0.0
+                else:
+                    self._anchor_xy   = None
+                    self._line_len_px = 0.0
+                return True
 
             # 2) paint on LeftButton + Move
             if self._stroke_active \
             and event.type() == QtCore.QEvent.MouseMove \
             and (event.buttons() & QtCore.Qt.LeftButton):
-                x, y = event.x(), event.y()
-                idx   = self._compute_brush_idx(x, y)
-                if idx:
-                    self._stroke_idxs.update(idx)
-                    if self.current_color is None:
-                        self.colors[idx] = self.original_colors[idx]
-                    else:
-                        self.colors[idx] = self.current_color
-                    self.plotter.update_scalars(self.colors, mesh=self.cloud, render=True)
-                return True     # consume
+
+                # Throttle heavy work (≈120 Hz)
+                if self._paint_timer.elapsed() < getattr(self, '_min_paint_ms', 8):
+                    return True
+                self._paint_timer.restart()
+
+                r_px = max(1, self.brush_slider.value())
+                step_px = max(1.0, r_px * float(getattr(self, "_paint_step_frac", 0.8)))
+
+                touched_idx = []
+                changed_any = False
+
+                if self._constrain_line and self._anchor_xy:
+                    # —— Straight line from anchor to current —— 
+                    ax, ay = self._anchor_xy
+                    x2, y2 = event.x(), event.y()
+                    vx, vy = (x2 - ax), (y2 - ay)
+                    dist   = math.hypot(vx, vy)
+
+                    if dist >= 1.0:
+                        start_len = float(self._line_len_px)
+                        end_len   = dist
+                        delta     = end_len - start_len
+                        n_steps   = int(delta / step_px)
+
+                        # Only stamp the NEW segment beyond what we've already painted
+                        for k in range(1, n_steps + 1):
+                            t_len = start_len + k * step_px
+                            t     = min(1.0, t_len / dist)
+                            xx    = ax + vx * t
+                            yy    = ay + vy * t
+
+                            idx = self._compute_brush_idx(xx, yy)
+                            if not idx:
+                                continue
+                            self._stroke_idxs.update(idx)
+                            if self.repair_mode:
+                                self.colors[idx] = self.original_colors[idx]
+                            else:
+                                if self.current_color is None:
+                                    self.colors[idx] = self.original_colors[idx]
+                                else:
+                                    self.colors[idx] = self.current_color
+                            self._session_edited[idx] = True
+                            touched_idx.append(idx)
+                            changed_any = True
+
+                        self._line_len_px = end_len
+                else:
+                    # —— Freehand with interpolated stamping —— 
+                    x2, y2 = event.x(), event.y()
+                    x1, y1 = self._last_paint_xy if self._last_paint_xy else (x2, y2)
+                    dist   = math.hypot(x2 - x1, y2 - y1)
+                    n_steps = max(1, int(dist / step_px))
+
+                    for k in range(1, n_steps + 1):
+                        t  = k / float(n_steps)
+                        xx = x1 + (x2 - x1) * t
+                        yy = y1 + (y2 - y1) * t
+
+                        idx = self._compute_brush_idx(xx, yy)
+                        if not idx:
+                            continue
+                        self._stroke_idxs.update(idx)
+                        if self.repair_mode:
+                            self.colors[idx] = self.original_colors[idx]
+                        else:
+                            if self.current_color is None:
+                                self.colors[idx] = self.original_colors[idx]
+                            else:
+                                self.colors[idx] = self.current_color
+                        self._session_edited[idx] = True
+                        touched_idx.append(idx)
+                        changed_any = True
+
+                    self._last_paint_xy = (x2, y2)
+
+                if changed_any:
+                    self.toggle_ann_chk.setEnabled(np.any(self._session_edited))
+                    flat = np.concatenate(touched_idx) if touched_idx else np.array([], dtype=int)
+                    if flat.size:
+                        self._blend_into_mesh_subset(flat)
+                    self._stroke_render_timer.start(0)
+                return True
 
             # 3) finish on LeftButtonRelease
             if self._stroke_active \
             and event.type() == QtCore.QEvent.MouseButtonRelease \
             and event.button() == QtCore.Qt.LeftButton:
-                self._stroke_active = False
+                self._stroke_active  = False
+                self._in_stroke      = False
+                self._last_paint_xy  = None
+                self._anchor_xy      = None
+                self._line_len_px    = 0.0
+                self._constrain_line = False
+
                 if self._stroke_idxs:
                     idxs = list(self._stroke_idxs)
                     old  = self._colors_before_stroke[idxs]
                     self.history.append((idxs, old))
                     self.redo_stack.clear()
                 self._colors_before_stroke = None
-                return True     # consume
+
+                # One full refresh to ensure global consistency
+                self.update_annotation_visibility()
+                return True
 
         # all other events (including two-finger pan, right-drag, etc.) go to QtInteractor
         return super().eventFilter(obj, event)
@@ -702,7 +1199,15 @@ class Annotator(QtWidgets.QMainWindow):
 
         # Push to mesh and re-render
         self.cloud['RGB'] = current
-        self.plotter.update_scalars(current, mesh=self.cloud, render=True)
+        self.update_annotation_visibility()
+        
+        # In repair mode, ORIGINAL view must stay raw (no contrast) — REPLACE/ENSURE
+        if self.repair_mode and hasattr(self, 'cloud_ref'):
+            self.cloud_ref['RGB'] = self.original_colors.astype(np.uint8)
+            if not getattr(self, '_is_closing', False) and not getattr(self, '_batch', False):
+                self.plotter_ref.render()
+
+
                 
     def on_gamma_change(self, val):
         gamma = 2 ** ((val - 100) / 50.0)  # nonlinear mapping
@@ -722,7 +1227,14 @@ class Annotator(QtWidgets.QMainWindow):
         current[mask] = self.enhanced_colors[mask]
 
         self.cloud['RGB'] = current  # ✅ ← important!
-        self.plotter.update_scalars(current, mesh=self.cloud, render=True)
+        self.update_annotation_visibility()
+        
+        # In repair mode, ORIGINAL view must stay raw (no contrast) — REPLACE/ENSURE
+        if self.repair_mode and hasattr(self, 'cloud_ref'):
+            self.cloud_ref['RGB'] = self.original_colors.astype(np.uint8)
+            if not getattr(self, '_is_closing', False) and not getattr(self, '_batch', False):
+                self.plotter_ref.render()
+
 
     def apply_auto_contrast(self):
         # Normalize RGB to [0,1]
@@ -743,7 +1255,14 @@ class Annotator(QtWidgets.QMainWindow):
         current[mask] = self.enhanced_colors[mask]
 
         self.cloud['RGB'] = current
-        self.plotter.update_scalars(current, mesh=self.cloud, render=True)
+        self.update_annotation_visibility()
+
+        # In repair mode, ORIGINAL view must stay raw (no contrast) — REPLACE/ENSURE
+        if self.repair_mode and hasattr(self, 'cloud_ref'):
+            self.cloud_ref['RGB'] = self.original_colors.astype(np.uint8)
+            if not getattr(self, '_is_closing', False) and not getattr(self, '_batch', False):
+                self.plotter_ref.render()
+
 
         # Also update gamma label to reflect "Auto"
         self.gamma_value_label.setText("Auto")
@@ -775,7 +1294,321 @@ class Annotator(QtWidgets.QMainWindow):
         ax.legend()
         plt.tight_layout()
         plt.show()
+        
+    def set_annotations_visible(self, vis: bool):
+        self.annotations_visible = bool(vis)
+        # keep UI in sync without retriggering signals
+        if hasattr(self, 'toggle_ann_chk'):
+            self.toggle_ann_chk.blockSignals(True)
+            self.toggle_ann_chk.setChecked(self.annotations_visible)
+            self.toggle_ann_chk.blockSignals(False)
+        self.update_annotation_visibility()
 
+    def _current_base(self):
+        """Whatever contrast is active now: enhanced if available, else original."""
+        base = getattr(self, 'enhanced_colors', None)
+        if base is None or len(base) != len(self.original_colors):
+            base = self.original_colors
+        return base
+
+    def _on_toggle_ann_changed(self, state):
+        self.annotations_visible = (state == QtCore.Qt.Checked)
+        self.update_annotation_visibility()
+        
+    def on_alpha_change(self, val):                 # NEW
+        self.annotation_alpha = max(0.0, min(1.0, val / 100.0))
+        self.update_annotation_visibility()
+
+    def update_annotation_visibility(self):
+        if getattr(self, '_is_closing', False):
+            return
+        
+        if not hasattr(self, 'cloud') or self.cloud is None:
+            return
+
+        # Base: current contrast on ORIGINAL baseline (your existing logic)
+        base = getattr(self, 'enhanced_colors', None)
+        if base is None or len(base) != len(self.original_colors):
+            base = self.original_colors
+        base = base.astype(np.uint8)
+
+        # Start from base
+        display = base.copy()
+
+        # If annotations are hidden, just show base
+        if not getattr(self, 'annotations_visible', True):
+            self.cloud['RGB'] = display.astype(np.uint8)
+            if not getattr(self, '_is_closing', False) and not getattr(self, '_batch', False):
+                self.plotter.render()
+            return
+
+        # Edited points = where annotated layer differs from original baseline
+        edited_mask = np.any(self.colors != self.original_colors, axis=1)
+        if not np.any(edited_mask):
+            self.cloud['RGB'] = display.astype(np.uint8)
+            if not getattr(self, '_is_closing', False) and not getattr(self, '_batch', False):
+                self.plotter.render()
+            return
+
+        # Alpha blend only on edited points
+        a = float(getattr(self, 'annotation_alpha', 1.0))
+        if a >= 0.999:
+            display[edited_mask] = self.colors[edited_mask]
+        elif a <= 0.001:
+            # effectively invisible; keep base
+            pass
+        else:
+            fg = self.colors[edited_mask].astype(np.float32)
+            bg = base[edited_mask].astype(np.float32)
+            out = (a * fg + (1.0 - a) * bg).round().astype(np.uint8)
+            display[edited_mask] = out
+
+        self.plotter.update_scalars(display, mesh=self.cloud, render=True)
+
+    def toggle_repair_mode(self, on: bool):
+        self.repair_mode = bool(on)
+        self.plotter_ref.setVisible(self.repair_mode)
+
+        # Force Annotation Mode ON while repairing
+        if self.repair_mode and not self.annot_chk.isChecked():
+            self.annot_chk.setChecked(True)
+
+        # Show/Hide right label
+        if hasattr(self, 'right_title'):
+            self.right_title.setVisible(self.repair_mode)
+
+        # Refresh right scalars (original base)
+        if self.repair_mode and hasattr(self, 'cloud_ref'):
+            self.cloud_ref['RGB'] = self.original_colors.astype(np.uint8)  # ← raw original
+
+        # ← NEW: link/unlink cameras
+        if self.repair_mode:
+            self._link_cameras()
+        else:
+            self._unlink_cameras()
+
+        # Reposition overlays after layout change
+        QtCore.QTimer.singleShot(0, self._position_overlays)
+        self._schedule_fit()
+        self.update_annotation_visibility()
+        
+    def closeEvent(self, e):
+        self._is_closing = True  # block any future renders
+
+        # stop watching events on the VTK interactor
+        try:
+            self.plotter.interactor.removeEventFilter(self)
+        except Exception:
+            pass
+
+        # close the two QtInteractor windows safely
+        for view in [getattr(self, 'plotter_ref', None), getattr(self, 'plotter', None)]:
+            try:
+                if view is not None:
+                    view.close()
+            except Exception:
+                pass
+
+        super().closeEvent(e)
+        
+    def _sync_renders(self):
+        """Render both views safely (avoid recursion / closing / batching)."""
+        if (self._cam_syncing or getattr(self, '_is_closing', False)
+                or getattr(self, '_batch', False) or getattr(self, '_cam_pause', False)):  # NEW
+            return
+        self._cam_syncing = True
+        try:
+            if hasattr(self, 'plotter'):
+                self.plotter.render()
+            if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
+                self.plotter_ref.render()
+        finally:
+            self._cam_syncing = False
+
+    def _link_cameras(self):
+        """Make both panels share the same vtkCamera and keep renders in sync."""
+        if not hasattr(self, 'plotter') or not hasattr(self, 'plotter_ref'):
+            return
+        cam = self.plotter.renderer.GetActiveCamera()
+        self.plotter_ref.renderer.SetActiveCamera(cam)      # share the SAME camera instance
+        # Observe camera changes to render both views
+        if self._cam_observer_id is None:
+            self._shared_camera = cam
+            self._cam_observer_id = cam.AddObserver("ModifiedEvent", lambda *_: self._sync_renders())
+        # one initial sync render
+        self._sync_renders()
+
+    def _unlink_cameras(self):
+        """Detach the right panel from the shared camera (but keep current view)."""
+        if self._shared_camera is not None and self._cam_observer_id is not None:
+            try:
+                self._shared_camera.RemoveObserver(self._cam_observer_id)
+            except Exception:
+                pass
+        self._cam_observer_id = None
+        # Give right panel its own camera, duplicating current pose so it doesn’t jump
+        try:
+            if hasattr(self, 'plotter_ref'):
+                new_cam = vtkCamera()
+                new_cam.DeepCopy(self.plotter.renderer.GetActiveCamera())
+                self.plotter_ref.renderer.SetActiveCamera(new_cam)
+        except Exception:
+            pass
+        self._shared_camera = None        
+        
+    def _begin_batch(self):                                # REPLACE with:
+        self._batch = True
+        self._cam_pause = True          # NEW: pause cam observer effects
+        # While rebuilding a file, unlink cameras so view changes don’t echo back
+        try:
+            if self.repair_mode:
+                self._unlink_cameras()  # NEW
+        except Exception:
+            pass
+        
+        self._cam_snap_l = self._snap_camera(self.plotter)         # NEW
+        self._cam_snap_r = self._snap_camera(self.plotter_ref) if self.plotter_ref.isVisible() else None  # NEW
+
+        for view in [getattr(self, 'plotter', None), getattr(self, 'plotter_ref', None)]:
+            if view:
+                view.interactor.setUpdatesEnabled(False)
+
+    def _finalize_layout(self):
+        if getattr(self, '_is_closing', False):
+            return
+
+        # Restore previous camera (prevents a blank/odd first frame)
+        try:
+            if hasattr(self, 'plotter'):
+                self.plotter.render()
+            if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
+                self.plotter_ref.render()
+        except Exception:
+            pass
+
+        # NOW enforce the chosen view (this overrides any stale orientation)
+        self.apply_view()  # schedules the debounced fit internally
+
+        # Overlays once sizes have settled
+        self._position_overlays()
+
+        # Quick render so the user sees something immediately
+        if not getattr(self, '_startup', False):
+            if hasattr(self, 'plotter'):
+                self.plotter.render()
+            if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
+                self.plotter_ref.render()
+
+        # Clear snapshots
+        self._cam_snap_l = None
+        self._cam_snap_r = None
+
+    def _pre_fit_camera(self, mesh, plotter):
+        """
+        Set camera orientation + an initial distance/scale using mesh bounds,
+        before any actors are added. No render here.
+        """
+        if mesh is None or mesh.n_points == 0 or plotter is None:
+            return
+
+        cam = plotter.camera
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+        cx, cy, cz = (xmin + xmax) / 2.0, (ymin + ymax) / 2.0, (zmin + zmax) / 2.0
+        xr, yr, zr = (xmax - xmin), (ymax - ymin), (zmax - zmin)
+        r = 0.5 * float(np.linalg.norm([xr, yr, zr])) or 1.0
+
+        w = max(1, plotter.interactor.width())
+        h = max(1, plotter.interactor.height())
+        aspect = w / float(h)
+        pad = float(getattr(self, "_fit_pad", 1.12))
+
+        topdown = (self.view_combo.currentText() == 'Top-Down')
+
+        if topdown:
+            # Orthographic straight down
+            cam.ParallelProjectionOn()
+            cam.SetViewUp(0, 1, 0)
+            dop = np.array([0.0, 0.0, -1.0])
+            # ParallelScale ≈ half visible height
+            scale_h = 0.5 * yr
+            scale_w = 0.5 * xr / max(aspect, 1e-6)
+            cam.SetParallelScale(max(scale_h, scale_w) * pad)
+            pos = np.array([cx, cy, cz]) - dop * (r * 2.0 + 1.0)  # any positive distance
+            cam.SetFocalPoint(cx, cy, cz)
+            cam.SetPosition(*pos)
+        else:
+            # South-West isometric (from -X,-Y,+Z)
+            cam.ParallelProjectionOff()
+            cam.SetViewUp(0, 0, 1)
+            dop = np.array([1.0, 1.0, -1.0]); dop /= np.linalg.norm(dop)
+            vfov = np.deg2rad(cam.GetViewAngle())
+            hfov = 2.0 * np.arctan(np.tan(vfov / 2.0) * aspect)
+            eff = max(1e-3, min(vfov, hfov))
+            dist = r / np.tan(eff / 2.0) * pad
+            cam.SetFocalPoint(cx, cy, cz)
+            cam.SetPosition(*(np.array([cx, cy, cz]) - dop * dist))
+
+    def _end_batch(self):                                  # REPLACE with:
+        for view in [getattr(self, 'plotter', None), getattr(self, 'plotter_ref', None)]:
+            if view:
+                view.interactor.setUpdatesEnabled(True)
+        # Re-link cameras AFTER fit to avoid bounce
+        if self.repair_mode:
+            self._link_cameras()            # NEW
+        self._batch = False
+        self._cam_pause = False             # NEW
+        # Defer fit+render until the splitter/widget sizes settle this event loop
+        QtCore.QTimer.singleShot(0, self._finalize_layout)  # NEW
+
+    def _schedule_fit(self, delay=None):
+        """Coalesce multiple fit requests into one."""
+        if getattr(self, '_is_closing', False):
+            return
+        if getattr(self, '_batch', False):
+            return  # during batch, we defer fits until _end_batch()
+        if delay is None:
+            delay = getattr(self, '_fit_delay_ms', 33)
+        self._fit_timer.stop()
+        self._fit_timer.start(int(delay))
+
+    def _render_views_once(self):
+        if getattr(self, '_is_closing', False) or getattr(self, '_batch', False):
+            return
+        try:
+            if hasattr(self, 'plotter'):
+                self.plotter.render()
+            if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
+                self.plotter_ref.render()
+        except Exception:
+            pass
+
+    def _blend_into_mesh_subset(self, idx):
+        """
+        Update self.cloud['RGB'][idx] only, reflecting current annotation visibility/alpha.
+        """
+        if idx is None or len(idx) == 0:
+            return
+
+        # current baseline (enhanced if available, else original)
+        base = getattr(self, 'enhanced_colors', None)
+        if base is None or len(base) != len(self.original_colors):
+            base = self.original_colors
+
+        if not getattr(self, 'annotations_visible', True):
+            # annotations hidden → show base colors
+            self.cloud['RGB'][idx] = base[idx].astype(np.uint8)
+            return
+
+        a = float(getattr(self, 'annotation_alpha', 1.0))
+        if a >= 0.999:
+            self.cloud['RGB'][idx] = self.colors[idx].astype(np.uint8)
+        elif a <= 0.001:
+            self.cloud['RGB'][idx] = base[idx].astype(np.uint8)
+        else:
+            fg = self.colors[idx].astype(np.float32)
+            bg = base[idx].astype(np.float32)
+            out = (a * fg + (1.0 - a) * bg).round().astype(np.uint8)
+            self.cloud['RGB'][idx] = out
 
 
 if __name__ == '__main__':
