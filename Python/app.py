@@ -76,6 +76,7 @@ class Annotator(QtWidgets.QMainWindow):
         
         self._batch = False
         self._cam_pause = False      # NEW: pause camera-sync renders during loads
+        self._in_zoom = False          # reentrancy guard for atomic zoom
 
         self._fit_pad = 1.12
                 
@@ -1039,6 +1040,21 @@ class Annotator(QtWidgets.QMainWindow):
     def eventFilter(self, obj, event):
         if getattr(self, '_is_closing', False):
             return
+        
+        # LEFT pane wheel
+        if obj is self.plotter.interactor and event.type() == QtCore.QEvent.Wheel:
+            if getattr(self, '_stroke_active', False) or getattr(self, '_in_zoom', False):
+                return False
+            self._zoom_at_cursor_for(self.plotter, event.x(), event.y(), event.angleDelta().y())
+            return True
+
+        # RIGHT pane wheel (when visible)
+        if hasattr(self, 'plotter_ref') and obj is self.plotter_ref.interactor \
+        and event.type() == QtCore.QEvent.Wheel and self.plotter_ref.isVisible():
+            if getattr(self, '_in_zoom', False):
+                return False
+            self._zoom_at_cursor_for(self.plotter_ref, event.x(), event.y(), event.angleDelta().y())
+            return True
 
         if obj is self.plotter.interactor and self.annot_chk.isChecked():
             # 1) start stroke on LeftButtonPress
@@ -1609,6 +1625,132 @@ class Annotator(QtWidgets.QMainWindow):
             bg = base[idx].astype(np.float32)
             out = (a * fg + (1.0 - a) * bg).round().astype(np.uint8)
             self.cloud['RGB'][idx] = out
+            
+    def _zoom_at_cursor_for(self, plotter, x: int, y: int, delta_y: int):
+        """
+        Fluid, infinite zoom anchored at the cursor for a given plotter (left or right).
+        Atomic when cameras are linked to avoid shake.
+        """
+        if plotter is None:
+            return
+        ren   = plotter.renderer
+        inter = plotter.interactor
+        cam   = plotter.camera
+        H     = inter.height()
+
+        # ====== ATOMIC SECTION when shared camera is active ======
+        atomic = bool(self.repair_mode and self._shared_camera is not None)
+        if atomic:
+            if self._in_zoom:   # prevent re-entrancy from nested events
+                return
+            self._in_zoom = True
+            self._cam_pause = True                 # pause _sync_renders()
+            # Temporarily stop UI updates to avoid mid-step paints
+            try:
+                self.plotter.interactor.setUpdatesEnabled(False)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, 'plotter_ref'):
+                    self.plotter_ref.interactor.setUpdatesEnabled(False)
+            except Exception:
+                pass
+
+        try:
+            # -------- helpers --------
+            def ray_through_xy(renderer, xx, yy):
+                renderer.SetDisplayPoint(float(xx), float(H - yy), 0.0); renderer.DisplayToWorld()
+                x0, y0, z0, w0 = renderer.GetWorldPoint()
+                if abs(w0) > 1e-12: x0, y0, z0 = x0 / w0, y0 / w0, z0 / w0
+
+                renderer.SetDisplayPoint(float(xx), float(H - yy), 1.0); renderer.DisplayToWorld()
+                x1, y1, z1, w1 = renderer.GetWorldPoint()
+                if abs(w1) > 1e-12: x1, y1, z1 = x1 / w1, y1 / w1, z1 / w1
+
+                o = np.array([x0, y0, z0], dtype=float)
+                d = np.array([x1, y1, z1], dtype=float) - o
+                n = float(np.linalg.norm(d))
+                if n < 1e-12:
+                    o = np.array(cam.GetPosition(), dtype=float)
+                    d = np.array(cam.GetFocalPoint(), dtype=float) - o
+                    n = float(np.linalg.norm(d))
+                return o, (d / max(n, 1e-12))
+
+            # --- pre-zoom camera state + focal-plane anchor under cursor ---
+            pos0 = np.array(cam.GetPosition(),   dtype=float)
+            fp0  = np.array(cam.GetFocalPoint(), dtype=float)
+            vu0  = np.array(cam.GetViewUp(),     dtype=float)
+
+            n0 = fp0 - pos0
+            n0n = float(np.linalg.norm(n0))
+            if n0n < 1e-12:
+                return
+            n0 /= n0n
+
+            o0, d0 = ray_through_xy(ren, x, y)
+            denom0 = float(np.dot(d0, n0))
+            anchor = fp0.copy() if abs(denom0) < 1e-12 else (o0 + d0 * float(np.dot(fp0 - o0, n0) / denom0))
+
+            # --- smooth zoom (same “feel”) ---
+            factor = 1.0 if delta_y == 0 else (1.2 ** (delta_y / 120.0))
+            if factor <= 0.0:
+                return
+
+            if cam.GetParallelProjection():
+                cam.SetParallelScale(cam.GetParallelScale() / max(1e-6, factor))
+                shift = (anchor - fp0) * (1.0 - 1.0 / factor)
+                cam.SetFocalPoint(*(fp0 + shift))
+                cam.SetPosition(*(pos0 + shift))
+                cam.SetViewUp(*vu0)
+            else:
+                cam.SetPosition(* (anchor + (pos0 - anchor) / factor))
+                cam.SetFocalPoint(* (anchor + (fp0  - anchor) / factor))
+                cam.SetViewUp(*vu0)
+
+            # --- force post-zoom cursor ray to pass through the SAME anchor ---
+            pos1 = np.array(cam.GetPosition(),   dtype=float)
+            fp1  = np.array(cam.GetFocalPoint(), dtype=float)
+            n1   = fp1 - pos1; n1n = float(np.linalg.norm(n1))
+            if n1n >= 1e-12:
+                n1 /= n1n
+                o1, d1 = ray_through_xy(ren, x, y)
+                denom1 = float(np.dot(d1, n1))
+                if abs(denom1) > 1e-12:
+                    t1  = float(np.dot(anchor - o1, n1) / denom1)
+                    q   = o1 + d1 * t1
+                    pan = anchor - q
+                    if np.isfinite(pan).all():
+                        cam.SetPosition(*(pos1 + pan))
+                        cam.SetFocalPoint(*(fp1 + pan))
+                        cam.SetViewUp(*vu0)
+
+            # Defer clipping until the very end to avoid extra matrix churn
+        finally:
+            if atomic:
+                # Resume UI updates
+                try:
+                    self.plotter.interactor.setUpdatesEnabled(True)
+                except Exception:
+                    pass
+                try:
+                    if hasattr(self, 'plotter_ref'):
+                        self.plotter_ref.interactor.setUpdatesEnabled(True)
+                except Exception:
+                    pass
+                self._cam_pause = False
+                self._in_zoom = False
+
+        # Single, synchronized refresh (prevents “shake”)
+        try:
+            plotter.reset_camera_clipping_range()
+            if self.repair_mode and getattr(self, 'plotter_ref', None) is not None and self.plotter_ref.isVisible():
+                # Render both once
+                self._sync_renders()
+            else:
+                plotter.render()
+        except Exception:
+            pass
+
 
 
 if __name__ == '__main__':
