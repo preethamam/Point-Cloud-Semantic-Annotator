@@ -12,6 +12,7 @@ Features:
   - Reset view (button + 'R')
   - Previous/Next navigation (buttons + Left/Right arrows)
   - Save annotations (Save button + Ctrl/Cmd+S)
+  - Autosave annotations
   - Open folder via button
   - Maximized window with top-down or isometric initial view
   - Magenta circular cursor matching brush size in annotation mode
@@ -516,14 +517,38 @@ class Annotator(QtWidgets.QMainWindow):
         ur.addWidget(self.eraser_btn)
         ur.addWidget(self.repair_btn)
         
+        # --- Previous / Next row (make each take 50%) ---
         nav = QtWidgets.QHBoxLayout(); bp.addLayout(nav)
-        self.prev_btn = QtWidgets.QPushButton('Previous'); self.next_btn = QtWidgets.QPushButton('Next'); self.prev_btn.clicked.connect(self.on_prev); self.next_btn.clicked.connect(self.on_next); nav.addWidget(self.prev_btn); nav.addWidget(self.next_btn)
-        self.save_btn = QtWidgets.QPushButton('Save (Ctrl+S)'); self.save_btn.clicked.connect(self.on_save); bp.addWidget(self.save_btn)
-        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.alpha_slider,self.repair_btn]: w.setEnabled(False)
+        self.prev_btn = QtWidgets.QPushButton('Previous')
+        self.next_btn = QtWidgets.QPushButton('Next')
+        self.prev_btn.clicked.connect(self.on_prev)
+        self.next_btn.clicked.connect(self.on_next)
+        nav.addWidget(self.prev_btn, 1)   # 50%
+        nav.addWidget(self.next_btn, 1)   # 50%
+
+        # --- Save / Autosave row mirrored under it ---
+        save_autosave_row = QtWidgets.QHBoxLayout(); bp.addLayout(save_autosave_row)
+
+        # Save under Previous, SAME width by making it Expanding in a 50% cell
+        self.save_btn = QtWidgets.QPushButton('Save (Ctrl+S)')
+        self.save_btn.clicked.connect(self.on_save)
+        self.save_btn.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
+        save_autosave_row.addWidget(self.save_btn, 1)  # fills left 50% like 'Previous'
+
+        # Autosave centered under Next
+        self.autosave_chk = QtWidgets.QCheckBox('Autosave')
+        self.autosave_chk.setToolTip('Automatically save when moving to Previous/Next')
+        self.autosave_chk.setChecked(True)
+        save_autosave_row.addWidget(self.autosave_chk, 1, alignment=QtCore.Qt.AlignHCenter)
+        
+        bp.addLayout(save_autosave_row)
+
+
+        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.alpha_slider,self.repair_btn,self.autosave_chk]: w.setEnabled(False)
 
 
     def _enable_controls(self):
-        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn,self.eraser_btn,self.gamma_slider,self.reset_contrast_btn,self.auto_contrast_btn,self.hist_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.open_ann_btn, self.open_orig_btn,self.alpha_slider,self.repair_btn]: w.setEnabled(True)
+        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn,self.eraser_btn,self.gamma_slider,self.reset_contrast_btn,self.auto_contrast_btn,self.hist_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.open_ann_btn, self.open_orig_btn,self.alpha_slider,self.repair_btn,self.autosave_chk]: w.setEnabled(True)
 
     def open_ann_folder(self):
         fol = QtWidgets.QFileDialog.getExistingDirectory(self, 'Select Annotation PC Folder')
@@ -923,9 +948,16 @@ class Annotator(QtWidgets.QMainWindow):
         # push update back into the plot
         self.update_annotation_visibility()
 
+    def _maybe_autosave_before_nav(self):
+        """Autosave silently (no dialogs) if enabled and there were edits."""
+        if getattr(self, 'autosave_chk', None) and self.autosave_chk.isChecked():
+            edited = bool(getattr(self, '_session_edited', None) is not None and np.any(self._session_edited))
+            if edited:
+                self.on_save(_autosave=True)
 
     def on_prev(self):
         if self.index > 0:
+            self._maybe_autosave_before_nav()
             self.index -= 1
             self.history.clear()
             self.redo_stack.clear()
@@ -934,6 +966,7 @@ class Annotator(QtWidgets.QMainWindow):
 
     def on_next(self):
         if self.index < len(self.files) - 1:
+            self._maybe_autosave_before_nav()
             self.index += 1
             self.history.clear()
             self.redo_stack.clear()
@@ -960,16 +993,21 @@ class Annotator(QtWidgets.QMainWindow):
         self.toggle_ann_chk.setEnabled(np.any(self._session_edited))
         self.update_annotation_visibility()
 
-    def on_save(self):
+    def on_save(self, _autosave: bool = False):
         out = Path(self.files[self.index])
         ext = out.suffix.lower()
 
-        # ——— Ask user whether to save with gamma-enhanced colors ———
-        choice = QtWidgets.QMessageBox.question(
-            self, 'Save Options',
-            'Save with contrast-enhanced colors (Gamma adjusted)?',
-            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
-        )
+        if _autosave:
+            # Silent choice for autosave: keep it conservative (no gamma baking)
+            choice = QtWidgets.QMessageBox.Yes   # choice = QtWidgets.QMessageBox.Yes (Gamma baking) | QtWidgets.QMessageBox.No (keep as is)
+        else:
+            # ——— Ask user whether to save with gamma-enhanced colors ———
+            # ——— Ask user whether to save with gamma-enhanced colors ———
+            choice = QtWidgets.QMessageBox.question(
+                self, 'Save Options',
+                'Save with contrast-enhanced colors (Gamma adjusted)?',
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No
+            )
 
         # ——— Decide which colors to save ———
         save_colors = self.colors.copy()
@@ -997,10 +1035,19 @@ class Annotator(QtWidgets.QMainWindow):
         else:
             self.cloud.save(str(out))
 
-        QtWidgets.QMessageBox.information(
-            self, 'Saved',
-            f'Successfully saved {ext[1:]} file with colors to and reloaded:\n{out}'
-        )
+        # Mark current cloud as saved for this session
+        try:
+            self._session_edited = np.zeros(self.cloud.n_points, dtype=bool)
+            self.toggle_ann_chk.setEnabled(np.any(self._session_edited))
+        except Exception:
+            pass
+
+        if not _autosave:
+            QtWidgets.QMessageBox.information(
+                self, 'Saved',
+                f'Successfully saved {ext[1:]} file with colors to and reloaded:\n{out}'
+            )
+
 
     def _on_plus(self):
         if self._waiting == 'brush':
