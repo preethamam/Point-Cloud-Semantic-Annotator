@@ -112,6 +112,11 @@ class Annotator(QtWidgets.QMainWindow):
         # allow us to catch mouse‐moves on the VTK widget
         self.plotter.interactor.setMouseTracking(True)
         self.plotter.interactor.installEventFilter(self)
+        
+        # ⬇️ Make zoom-at-cursor work on the LEFT (original) view too
+        self.plotter_ref.interactor.setMouseTracking(True)
+        self.plotter_ref.interactor.installEventFilter(self)
+
         self._stroke_active           = False
         self._stroke_idxs             = set()
         self._colors_before_stroke    = None
@@ -1088,19 +1093,22 @@ class Annotator(QtWidgets.QMainWindow):
         if getattr(self, '_is_closing', False):
             return
         
-        # LEFT pane wheel
+        # RIGHT pane wheel
         if obj is self.plotter.interactor and event.type() == QtCore.QEvent.Wheel:
             if getattr(self, '_stroke_active', False) or getattr(self, '_in_zoom', False):
                 return False
             self._zoom_at_cursor_for(self.plotter, event.x(), event.y(), event.angleDelta().y())
             return True
 
-        # RIGHT pane wheel (when visible)
-        if hasattr(self, 'plotter_ref') and obj is self.plotter_ref.interactor \
-        and event.type() == QtCore.QEvent.Wheel and self.plotter_ref.isVisible():
-            if getattr(self, '_in_zoom', False):
+
+        # LEFT pane wheel (original view)
+        if obj is getattr(self, 'plotter_ref', None).interactor and event.type() == QtCore.QEvent.Wheel:
+            # If the left pane isn’t currently shown, don’t swallow the wheel event.
+            if not self.plotter_ref.isVisible():
                 return False
-            self._zoom_at_cursor_for(self.plotter_ref, event.x(), event.y(), event.angleDelta().y())
+            # When cameras are linked in Repair mode, drive the shared camera via the right plotter.
+            target = self.plotter if (self.repair_mode and self._shared_camera is not None) else self.plotter_ref
+            self._zoom_at_cursor_for(target, event.x(), event.y(), event.angleDelta().y())
             return True
 
         if obj is self.plotter.interactor and self.annot_chk.isChecked():
@@ -1461,6 +1469,7 @@ class Annotator(QtWidgets.QMainWindow):
         # stop watching events on the VTK interactor
         try:
             self.plotter.interactor.removeEventFilter(self)
+            self.plotter_ref.interactor.removeEventFilter(self)
         except Exception:
             pass
 
@@ -1797,7 +1806,6 @@ class Annotator(QtWidgets.QMainWindow):
                 plotter.render()
         except Exception:
             pass
-
 
 
 if __name__ == '__main__':
