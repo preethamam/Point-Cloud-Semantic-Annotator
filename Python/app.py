@@ -80,6 +80,10 @@ class Annotator(QtWidgets.QMainWindow):
         self._in_zoom = False          # reentrancy guard for atomic zoom
 
         self._fit_pad = 1.12
+        
+        self.current_color = [255,0,0]
+        self._last_paint_color = self.current_color.copy()   # NEW: restore when eraser off
+
                 
         # ——— Debounced camera fitting ———
         self._fit_delay_ms = 33  # ~2 frames at 60Hz; tweak 16–50ms if you like
@@ -108,6 +112,10 @@ class Annotator(QtWidgets.QMainWindow):
 
         # Build UI
         self._build_ui()        
+        
+        # --- ensure Annotation Mode ON at startup ---
+        self.annot_chk.setChecked(True)
+        self.update_cursor()
             
         # allow us to catch mouse‐moves on the VTK widget
         self.plotter.interactor.setMouseTracking(True)
@@ -506,6 +514,10 @@ class Annotator(QtWidgets.QMainWindow):
         self.eraser_btn.setToolTip('Eraser Tool — revert to original colors')
         self.eraser_btn.clicked.connect(self.activate_eraser)
         
+        # NEW: checkable + highlight when active + toggled handler
+        self.eraser_btn.setCheckable(True)
+        self.eraser_btn.toggled.connect(self._on_eraser_toggled)   # NEW
+        
         self.undo_btn = QtWidgets.QPushButton('Undo (Ctrl+Z)')
         self.redo_btn = QtWidgets.QPushButton('Redo (Ctrl+Y)')
         self.eraser_btn.setText('Eraser (E)')  # reuse existing button
@@ -544,10 +556,7 @@ class Annotator(QtWidgets.QMainWindow):
         self.autosave_chk = QtWidgets.QCheckBox('Autosave')
         self.autosave_chk.setToolTip('Automatically save when moving to Previous/Next')
         self.autosave_chk.setChecked(True)
-        save_autosave_row.addWidget(self.autosave_chk, 1, alignment=QtCore.Qt.AlignHCenter)
-        
-        bp.addLayout(save_autosave_row)
-
+        save_autosave_row.addWidget(self.autosave_chk, 1, alignment=QtCore.Qt.AlignHCenter)        
 
         for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.alpha_slider,self.repair_btn,self.autosave_chk]: w.setEnabled(False)
 
@@ -649,7 +658,7 @@ class Annotator(QtWidgets.QMainWindow):
 
         self._session_edited = np.zeros(self.cloud.n_points, dtype=bool)
         has_any_edit_now = np.any(self.colors != self.original_colors)
-        self.toggle_ann_chk.setEnabled(has_any_edit_now)
+        self.toggle_ann_chk.setEnabled(bool(has_any_edit_now))
         
         self.annotations_visible = getattr(self, 'toggle_ann_chk', None) is None or self.toggle_ann_chk.isChecked()
         self.update_annotation_visibility()
@@ -902,6 +911,9 @@ class Annotator(QtWidgets.QMainWindow):
         c = QtWidgets.QColorDialog.getColor()
         if c.isValid():
             self.current_color = [c.red(), c.green(), c.blue()]
+            self._last_paint_color = self.current_color.copy()      # NEW
+            self.eraser_btn.setChecked(False)                       # NEW
+
 
     def select_swatch(self, col, btn):
         for b in self.swatches:
@@ -909,6 +921,8 @@ class Annotator(QtWidgets.QMainWindow):
         btn.setStyleSheet(btn.styleSheet().replace('1px solid #333', '2px solid yellow'))
         qc = QColor(col)
         self.current_color = [qc.red(), qc.green(), qc.blue()]
+        self._last_paint_color = self.current_color.copy()          # NEW
+        self.eraser_btn.setChecked(False)                           # NEW
 
     def on_click(self, x, y):
         if not self.annot_chk.isChecked():
@@ -937,18 +951,14 @@ class Annotator(QtWidgets.QMainWindow):
         old = self.colors[idx].copy()
         self.history.append((idx, old))
         self.redo_stack.clear()
-        # apply new color
-        if self.repair_mode:
-            # Repair = copy ORIGINAL back into annotated layer
+        # apply new color (eraser only when eraser is active)
+        if (self.eraser_btn.isChecked() or self.current_color is None):
             self.colors[idx] = self.original_colors[idx]
         else:
-            if self.current_color is None:
-                self.colors[idx] = self.original_colors[idx]
-            else:
-                self.colors[idx] = self.current_color
+            self.colors[idx] = self.current_color
         
         self._session_edited[idx] = True
-        self.toggle_ann_chk.setEnabled(np.any(self._session_edited)) 
+        self.toggle_ann_chk.setEnabled(bool(np.any(self._session_edited)))
         
         # push update back into the plot
         self.update_annotation_visibility()
@@ -985,7 +995,7 @@ class Annotator(QtWidgets.QMainWindow):
         self.redo_stack.append((idx, self.colors[idx].copy()))
         self.colors[idx] = old
         self._session_edited[idx] = False
-        self.toggle_ann_chk.setEnabled(np.any(self._session_edited))
+        self.toggle_ann_chk.setEnabled(bool(np.any(self._session_edited)))
         self.update_annotation_visibility()
 
     def on_redo(self):
@@ -995,7 +1005,7 @@ class Annotator(QtWidgets.QMainWindow):
         self.history.append((idx, self.colors[idx].copy()))
         self.colors[idx] = cols
         self._session_edited[idx] = True
-        self.toggle_ann_chk.setEnabled(np.any(self._session_edited))
+        self.toggle_ann_chk.setEnabled(bool(np.any(self._session_edited)))
         self.update_annotation_visibility()
 
     def on_save(self, _autosave: bool = False):
@@ -1043,7 +1053,7 @@ class Annotator(QtWidgets.QMainWindow):
         # Mark current cloud as saved for this session
         try:
             self._session_edited = np.zeros(self.cloud.n_points, dtype=bool)
-            self.toggle_ann_chk.setEnabled(np.any(self._session_edited))
+            self.toggle_ann_chk.setEnabled(bool(np.any(self._session_edited)))
         except Exception:
             pass
 
@@ -1173,13 +1183,10 @@ class Annotator(QtWidgets.QMainWindow):
                             if not idx:
                                 continue
                             self._stroke_idxs.update(idx)
-                            if self.repair_mode:
+                            if (self.eraser_btn.isChecked() or self.current_color is None):
                                 self.colors[idx] = self.original_colors[idx]
                             else:
-                                if self.current_color is None:
-                                    self.colors[idx] = self.original_colors[idx]
-                                else:
-                                    self.colors[idx] = self.current_color
+                                self.colors[idx] = self.current_color
                             self._session_edited[idx] = True
                             touched_idx.append(idx)
                             changed_any = True
@@ -1201,13 +1208,10 @@ class Annotator(QtWidgets.QMainWindow):
                         if not idx:
                             continue
                         self._stroke_idxs.update(idx)
-                        if self.repair_mode:
+                        if (self.eraser_btn.isChecked() or self.current_color is None):
                             self.colors[idx] = self.original_colors[idx]
                         else:
-                            if self.current_color is None:
-                                self.colors[idx] = self.original_colors[idx]
-                            else:
-                                self.colors[idx] = self.current_color
+                            self.colors[idx] = self.current_color
                         self._session_edited[idx] = True
                         touched_idx.append(idx)
                         changed_any = True
@@ -1215,7 +1219,7 @@ class Annotator(QtWidgets.QMainWindow):
                     self._last_paint_xy = (x2, y2)
 
                 if changed_any:
-                    self.toggle_ann_chk.setEnabled(np.any(self._session_edited))
+                    self.toggle_ann_chk.setEnabled(bool(np.any(self._session_edited)))
                     flat = np.concatenate(touched_idx) if touched_idx else np.array([], dtype=int)
                     if flat.size:
                         self._blend_into_mesh_subset(flat)
@@ -1248,8 +1252,22 @@ class Annotator(QtWidgets.QMainWindow):
         return super().eventFilter(obj, event)
     
     def activate_eraser(self):
-        self.current_color = None  # Special flag for erasing        
+        # Toggle the button; the toggled handler sets current_color appropriately
+        self.eraser_btn.setChecked(not self.eraser_btn.isChecked())   
         
+    def _on_eraser_toggled(self, on: bool):
+        # Always ensure annotation mode is ON when toggling eraser
+        if not self.annot_chk.isChecked():
+            self.annot_chk.setChecked(True)
+            self.update_cursor()
+
+        if on:
+            # Enter eraser mode
+            self.current_color = None
+        else:
+            # Leave eraser mode → restore last paint color
+            self.current_color = self._last_paint_color.copy()
+           
     def reset_contrast(self):
         # Don't fire on_gamma_change while we move the slider
         self.gamma_slider.blockSignals(True)
@@ -1434,7 +1452,10 @@ class Annotator(QtWidgets.QMainWindow):
             out = (a * fg + (1.0 - a) * bg).round().astype(np.uint8)
             display[edited_mask] = out
 
-        self.plotter.update_scalars(display, mesh=self.cloud, render=True)
+        self.cloud['RGB'] = display.astype(np.uint8)
+        if not getattr(self, '_is_closing', False) and not getattr(self, '_batch', False):
+            self.plotter.render()
+
 
     def toggle_repair_mode(self, on: bool):
         self.repair_mode = bool(on)
@@ -1443,6 +1464,21 @@ class Annotator(QtWidgets.QMainWindow):
         # Force Annotation Mode ON while repairing
         if self.repair_mode and not self.annot_chk.isChecked():
             self.annot_chk.setChecked(True)
+            
+        # Always enable Annotation Mode in Repair and refresh cursor
+        if self.repair_mode:
+            # Make sure the checkbox state is ON (don’t rely on prior state)
+            self.annot_chk.blockSignals(True)
+            self.annot_chk.setChecked(True)
+            self.annot_chk.blockSignals(False)
+            self.update_cursor()                  # ensure magenta ring cursor is active
+
+            # Auto-turn Eraser ON (you can toggle it OFF to paint)
+            self.eraser_btn.setChecked(True)
+        else:
+            # leaving repair mode: no change to eraser or annotation mode
+            self.eraser_btn.setChecked(False)
+            # (Leaving repair mode: we leave eraser state as-is — no change)
 
         # Show/Hide right label
         if hasattr(self, 'right_title'):
