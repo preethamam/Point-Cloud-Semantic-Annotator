@@ -1,0 +1,8 @@
+pyvista
+pyvistaqt
+vtk
+PyQt5
+numpy
+scipy
+matplotlib
+appdirs
