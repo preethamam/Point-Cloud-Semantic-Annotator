@@ -512,7 +512,6 @@ class Annotator(QtWidgets.QMainWindow):
 
         self.eraser_btn = QtWidgets.QPushButton('Eraser (E)')
         self.eraser_btn.setToolTip('Eraser Tool — revert to original colors')
-        self.eraser_btn.clicked.connect(self.activate_eraser)
         
         # NEW: checkable + highlight when active + toggled handler
         self.eraser_btn.setCheckable(True)
