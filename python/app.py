@@ -14,7 +14,7 @@ Features:
   - Save annotations (Save button + Ctrl/Cmd+S)
   - Autosave annotations
   - Open folder via button
-  - Maximized window with top-down or isometric initial view
+  - Maximized window with Top view or isometric initial view
   - Magenta circular cursor matching brush size in annotation mode
   - File counter and filename overlays fixed at bottom
   - State persistence (last folder & index) via JSON in script directory
@@ -142,6 +142,19 @@ class Annotator(QtWidgets.QMainWindow):
         s(QKeySequence(QtCore.Qt.Key_Right), self, activated=self.on_next)
         s(QKeySequence.Save, self, activated=self.on_save)
         
+        
+        # --- View shortcuts (Ctrl+T / Ctrl+B / Ctrl+I) ---
+        sc_top = QtWidgets.QShortcut(QKeySequence('Ctrl+T'), self)
+        sc_top.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_top.activated.connect(lambda: self.view_combo.setCurrentIndex(0))
+
+        sc_bottom = QtWidgets.QShortcut(QKeySequence('Ctrl+B'), self)
+        sc_bottom.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_bottom.activated.connect(lambda: self.view_combo.setCurrentIndex(1))
+
+        sc_iso = QtWidgets.QShortcut(QKeySequence('Ctrl+I'), self)
+        sc_iso.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_iso.activated.connect(lambda: self.view_combo.setCurrentIndex(2))        
         
         sc_toggle = QtWidgets.QShortcut(QKeySequence('Shift+A'), self)
         sc_toggle.setContext(QtCore.Qt.ApplicationShortcut)   # <— important
@@ -399,7 +412,7 @@ class Annotator(QtWidgets.QMainWindow):
         ctrl.addWidget(line1)
 
         ctrl.addWidget(QtWidgets.QLabel('Initial View:'))
-        self.view_combo = QtWidgets.QComboBox(); self.view_combo.addItems(['Top-Down','Isometric']); self.view_combo.currentIndexChanged.connect(self.apply_view)
+        self.view_combo = QtWidgets.QComboBox(); self.view_combo.addItems(['Top view (Ctrl+T)','Bottom view (Ctrl+B)','Isometric view (Ctrl+I)']); self.view_combo.currentIndexChanged.connect(self.apply_view)
         ctrl.addWidget(self.view_combo)
         
         # ————— Reset + Zoom controls —————
@@ -636,8 +649,10 @@ class Annotator(QtWidgets.QMainWindow):
 
         # Set orientation ONCE; actual fit is deferred by _end_batch() → _finalize_layout()
         self.apply_view()
-        if self.view_combo.currentText() == 'Top-Down':
+        if self.view_combo.currentText() == 'Top view (Ctrl+T)':
             self.plotter_ref.view_xy()
+        elif self.view_combo.currentText() == 'Bottom view (Ctrl+B)':
+            self.plotter_ref.view_xy(-1)
         else:
             self.plotter_ref.view_isometric()
 
@@ -725,7 +740,7 @@ class Annotator(QtWidgets.QMainWindow):
         # Keep current orientation (no re-view); compute distance/scale only
         dirp = np.array(cam.GetDirectionOfProjection(), dtype=float)
         if not np.isfinite(dirp).all() or np.linalg.norm(dirp) < 1e-6:
-            dirp = np.array([0, 0, -1]) if self.view_combo.currentText() == 'Top-Down' else np.array([1, 1, -1])
+            dirp = np.array([0, 0, -1]) if self.view_combo.currentText() == 'Top view (Ctrl+T)' else np.array([1, 1, -1])
         dirp /= np.linalg.norm(dirp)
 
         if cam.GetParallelProjection():
@@ -775,11 +790,11 @@ class Annotator(QtWidgets.QMainWindow):
 
     def apply_view(self):
         """
-        Top-Down  -> orthographic, look straight down +Z with +Y up.
+        Top view  -> orthographic, look straight down +Z with +Y up.
         Isometric -> perspective, SOUTH-WEST isometric (from -X,-Y, +Z) with Z up.
         We set orientation explicitly for both panes, then defer the fit.
         """
-        topdown = (self.view_combo.currentText() == 'Top-Down')
+        topdown = (self.view_combo.currentText() == 'Top view (Ctrl+T)')
 
         def _apply(plotter, mesh, topdown: bool):
             if plotter is None or mesh is None or mesh.n_points == 0:
@@ -793,6 +808,10 @@ class Annotator(QtWidgets.QMainWindow):
                 cam.ParallelProjectionOn()
                 cam.SetViewUp(0, 1, 0)             # keep text/UI upright
                 dop = np.array([0.0, 0.0, -1.0])   # look down +Z
+            elif self.view_combo.currentText() == 'Bottom view (Ctrl+B)':
+                cam.ParallelProjectionOn()
+                cam.SetViewUp(0, 1, 0)             # keep text/UI upright
+                dop = np.array([0.0, 0.0, 1.0])   # look up +Z
             else:
                 # SOUTH-WEST isometric: from (-X, -Y, +Z) toward center
                 cam.ParallelProjectionOff()
@@ -1629,7 +1648,7 @@ class Annotator(QtWidgets.QMainWindow):
         aspect = w / float(h)
         pad = float(getattr(self, "_fit_pad", 1.12))
 
-        topdown = (self.view_combo.currentText() == 'Top-Down')
+        topdown = (self.view_combo.currentText() == 'Top view (Ctrl+T)')
 
         if topdown:
             # Orthographic straight down
