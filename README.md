@@ -140,6 +140,7 @@ Click "Open Folder" → select directory with `.ply` or `.pcd` point clouds → 
 9. Navigation: Previous / Next; overlays show progress count and filename.
 10. Save: Ctrl+S → Prompt decides whether to bake enhanced colors into untouched points.
 11. Autosave: Autosave the point cloud when any annotations are done and moved to the next file.
+12. Views: shows the top, bottom, front, back, left, right and SW, SE, NW, NE isometric views with their shortcuts.
 
 Best Practice: Apply contrast adjustments before extensive painting for consistency.
 
@@ -147,19 +148,29 @@ Best Practice: Apply contrast adjustments before extensive painting for consiste
 
 ## 7. Controls & Shortcuts
 
-| Action                 | Shortcut        | Notes                     |
-| ---------------------- | --------------- | ------------------------- |
-| Toggle Annotation Mode | A               | Enables brush & cursor    |
-| Brush Size             | B then +/−     | Pixel radius 1–200       |
-| Point Size             | D then +/−     | Display only              |
-| Zoom                   | Z then +/−     | Or UI buttons             |
-| Reset View             | R               | Re-applies preset         |
-| Eraser                 | E               | Restores original colors  |
-| Undo / Redo            | Ctrl+Z / Ctrl+Y | Stroke granularity        |
-| Save                   | Ctrl+S          | Enhancement bake prompt   |
-| Autosave               |                 | Autosaves the annotations |
-| Previous / Next File   | ← / →         | Natural ordering          |
-| Pick Color Dialog      | (Button)        | QColorDialog              |
+| Action                 | Shortcut        | Notes                           |
+| ---------------------- | --------------- | ------------------------------- |
+| Toggle Annotation Mode | A               | Enables brush & cursor          |
+| Brush Size             | B then +/−     | Pixel radius 1–200             |
+| Point Size             | D then +/−     | Display only                    |
+| Zoom                   | Z then +/−     | Or UI buttons                   |
+| Reset View             | R               | Re-applies preset               |
+| Eraser                 | E               | Restores original colors        |
+| Undo / Redo            | Ctrl+Z / Ctrl+Y | Stroke granularity              |
+| Save                   | Ctrl+S          | Enhancement bake prompt         |
+| Autosave               |                 | Autosaves the annotations       |
+| Previous / Next File   | ← / →         | Natural ordering                |
+| Pick Color Dialog      | (Button)        | QColorDialog                    |
+| Top view               | Ctrl+T          | Shows orthographic top view     |
+| Bottom view            | Ctrl+B          | Shows orthographic bottom view  |
+| Front view             | Ctrl+F          | Shows orthographic front view   |
+| Back view              | Ctrl+V          | Shows orthographic back view    |
+| Left view              | Ctrl+L          | Shows orthographic left view    |
+| Right view             | Ctrl+R          | Shows orthographic right view   |
+| SW Isometric view      | Ctrl+W          | Shows southwest isometric view |
+| SE isometric view      | Ctrl+E          | Shows southeast isometric view |
+| NW isometric view      | Ctrl+I          | Shows northwest isometric view |
+| NE isometric view     | Ctrl+O          | Shows northeast isometric view |
 
 ---
 

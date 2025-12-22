@@ -144,18 +144,47 @@ class Annotator(QtWidgets.QMainWindow):
         
         
         # --- View shortcuts (Ctrl+T / Ctrl+B / Ctrl+I) ---
-        sc_top = QtWidgets.QShortcut(QKeySequence('Ctrl+T'), self)
+        sc_top = QtWidgets.QShortcut(QKeySequence("Ctrl+T"), self)
         sc_top.setContext(QtCore.Qt.ApplicationShortcut)
         sc_top.activated.connect(lambda: self.view_combo.setCurrentIndex(0))
 
-        sc_bottom = QtWidgets.QShortcut(QKeySequence('Ctrl+B'), self)
+        sc_bottom = QtWidgets.QShortcut(QKeySequence("Ctrl+B"), self)
         sc_bottom.setContext(QtCore.Qt.ApplicationShortcut)
         sc_bottom.activated.connect(lambda: self.view_combo.setCurrentIndex(1))
-
-        sc_iso = QtWidgets.QShortcut(QKeySequence('Ctrl+I'), self)
-        sc_iso.setContext(QtCore.Qt.ApplicationShortcut)
-        sc_iso.activated.connect(lambda: self.view_combo.setCurrentIndex(2))        
         
+        sc_front = QtWidgets.QShortcut(QKeySequence("Ctrl+F"), self)
+        sc_front.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_front.activated.connect(lambda: self.view_combo.setCurrentIndex(2))
+        
+        sc_back = QtWidgets.QShortcut(QKeySequence("Ctrl+V"), self)
+        sc_back.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_back.activated.connect(lambda: self.view_combo.setCurrentIndex(3))
+        
+        sc_left = QtWidgets.QShortcut(QKeySequence("Ctrl+L"), self)
+        sc_left.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_left.activated.connect(lambda: self.view_combo.setCurrentIndex(4))
+        
+        sc_right = QtWidgets.QShortcut(QKeySequence("Ctrl+R"), self)
+        sc_right.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_right.activated.connect(lambda: self.view_combo.setCurrentIndex(5))
+
+        sc_swiso = QtWidgets.QShortcut(QKeySequence("Ctrl+W"), self)
+        sc_swiso.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_swiso.activated.connect(lambda: self.view_combo.setCurrentIndex(6))
+        
+        sc_seiso = QtWidgets.QShortcut(QKeySequence("Ctrl+E"), self)
+        sc_seiso.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_seiso.activated.connect(lambda: self.view_combo.setCurrentIndex(7))
+        
+        sc_nwiso = QtWidgets.QShortcut(QKeySequence("Ctrl+I"), self)
+        sc_nwiso.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_nwiso.activated.connect(lambda: self.view_combo.setCurrentIndex(8))
+        
+        sc_neiso = QtWidgets.QShortcut(QKeySequence("Ctrl+O"), self)
+        sc_neiso.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_neiso.activated.connect(lambda: self.view_combo.setCurrentIndex(9))      
+        
+        # --- Toggle Annotations shortcut (Shift+A) ---
         sc_toggle = QtWidgets.QShortcut(QKeySequence('Shift+A'), self)
         sc_toggle.setContext(QtCore.Qt.ApplicationShortcut)   # <— important
         sc_toggle.activated.connect(lambda: self.toggle_ann_chk.setChecked(
@@ -412,7 +441,18 @@ class Annotator(QtWidgets.QMainWindow):
         ctrl.addWidget(line1)
 
         ctrl.addWidget(QtWidgets.QLabel('Initial View:'))
-        self.view_combo = QtWidgets.QComboBox(); self.view_combo.addItems(['Top view (Ctrl+T)','Bottom view (Ctrl+B)','Isometric view (Ctrl+I)']); self.view_combo.currentIndexChanged.connect(self.apply_view)
+        self.view_combo = QtWidgets.QComboBox(); 
+        self.view_combo.addItems([  'Top view (Ctrl+T)',
+                                    'Bottom view (Ctrl+B)',
+                                    "Front view (Ctrl+F)",
+                                    "Back view (Ctrl+V)",
+                                    "Left view (Ctrl+L)",
+                                    "Right view (Ctrl+R)",
+                                    "SW Isometric view (Ctrl+W)",
+                                    "SE Isometric view (Ctrl+E)",
+                                    "NW Isometric view (Ctrl+I)",
+                                    "NE Isometric view (Ctrl+O)",])
+        self.view_combo.currentIndexChanged.connect(self.apply_view)
         ctrl.addWidget(self.view_combo)
         
         # ————— Reset + Zoom controls —————
@@ -812,11 +852,45 @@ class Annotator(QtWidgets.QMainWindow):
                 cam.ParallelProjectionOn()
                 cam.SetViewUp(0, 1, 0)             # keep text/UI upright
                 dop = np.array([0.0, 0.0, 1.0])   # look up +Z
-            else:
+            elif self.view_combo.currentText() == 'Front view (Ctrl+F)':
+                cam.ParallelProjectionOff()
+                cam.SetViewUp(0, 0, 1)             # Z up
+                dop = np.array([0.0, 1.0, 0.0])   # look along -Y
+            elif self.view_combo.currentText() == 'Back view (Ctrl+V)':
+                cam.ParallelProjectionOff()
+                cam.SetViewUp(0, 0, 1)             # Z up
+                dop = np.array([0.0, -1.0, 0.0])    # look along +Y
+            elif self.view_combo.currentText() == 'Left view (Ctrl+L)':
+                cam.ParallelProjectionOff()
+                cam.SetViewUp(0, 0, 1)             # Z up
+                dop = np.array([1.0, 0.0, 0.0])   # look along -X
+            elif self.view_combo.currentText() == 'Right view (Ctrl+R)':
+                cam.ParallelProjectionOff()
+                cam.SetViewUp(0, 0, 1)             # Z up
+                dop = np.array([-1.0, 0.0, 0.0])    # look along +X
+            elif self.view_combo.currentText() == 'SW Isometric view (Ctrl+W)':
                 # SOUTH-WEST isometric: from (-X, -Y, +Z) toward center
                 cam.ParallelProjectionOff()
                 cam.SetViewUp(0, 0, 1)             # Z up
                 dop = np.array([1.0, 1.0, -1.0])   # direction-of-projection (to center)
+                dop /= np.linalg.norm(dop)
+            elif self.view_combo.currentText() == 'SE Isometric view (Ctrl+E)':
+                # SOUTH-EAST isometric: from (+X, -Y, +Z) toward center
+                cam.ParallelProjectionOff()
+                cam.SetViewUp(0, 0, 1)             # Z up
+                dop = np.array([-1.0, 1.0, -1.0])  # direction-of-projection (to center)
+                dop /= np.linalg.norm(dop)
+            elif self.view_combo.currentText() == 'NW Isometric view (Ctrl+I)':
+                # NORTH-WEST isometric: from (-X, +Y, +Z) toward center
+                cam.ParallelProjectionOff()
+                cam.SetViewUp(0, 0, 1)             # Z up
+                dop = np.array([1.0, -1.0, -1.0])  # direction-of-projection (to center)
+                dop /= np.linalg.norm(dop)
+            elif self.view_combo.currentText() == 'NE Isometric view (Ctrl+O)':
+                # NORTH-EAST isometric: from (+X, +Y, +Z) toward center
+                cam.ParallelProjectionOff()
+                cam.SetViewUp(0, 0, 1)             # Z up
+                dop = np.array([-1.0, -1.0, -1.0]) # direction-of-projection (to center)
                 dop /= np.linalg.norm(dop)
 
             cam.SetFocalPoint(cx, cy, cz)
