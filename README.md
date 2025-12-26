@@ -39,16 +39,16 @@ The application focuses on interactive semantic recoloring of unstructured point
 
 ## 2. Feature Matrix
 
-| Category          | Capabilities                                                                                               |
-| ----------------- | ---------------------------------------------------------------------------------------------------------- |
-| Formats           | PLY (binary write), PCD (binary write), auto‑inject RGB channel if absent                                 |
-| Painting          | Screen‑space circular brush, adjustable size, undo/redo, eraser, color swatches, custom color dialog      |
-| Navigation        | Previous/Next file, natural sorting, view presets (Top‑Down / Isometric), zoom mode, reset camera         |
-| Display           | Adjustable point size, persistent overlays (index & filename), magenta brush cursor                        |
-| Color Enhancement | Gamma slider (nonlinear mapping), Auto Contrast (percentile stretch), RGB histogram (original vs enhanced) |
-| Save Options      | Conditional application of enhanced (unpainted) colors on save (prompt)                                    |
-| Persistence       | Last folder + file index stored via `appdirs` platform path                                              |
-| Performance       | cKDTree region queries, hybrid world + screen filter for precise brush footprint                           |
+| Category          | Capabilities                                                                                                               |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| Formats           | PLY (binary write), PCD (binary write), auto‑inject RGB channel if absent                                                 |
+| Painting          | Screen‑space circular brush, adjustable size, undo/redo, eraser, color swatches, custom color dialog, clone               |
+| Navigation        | Previous/Next file, natural sorting, view presets (Top‑Down / Isometric), zoom mode, reset camera, loop, jump to text box |
+| Display           | Adjustable point size, persistent overlays (index & filename), magenta brush cursor                                        |
+| Color Enhancement | Gamma slider (nonlinear mapping), Auto Contrast (percentile stretch), RGB histogram (original vs enhanced)                 |
+| Save Options      | Conditional application of enhanced (unpainted) colors on save (prompt)                                                    |
+| Persistence       | Last folder + file index stored via `appdirs` platform path                                                              |
+| Performance       | cKDTree region queries, hybrid world + screen filter for precise brush footprint                                           |
 
 ---
 
@@ -141,6 +141,7 @@ Click "Open Folder" → select directory with `.ply` or `.pcd` point clouds → 
 10. Save: Ctrl+S → Prompt decides whether to bake enhanced colors into untouched points.
 11. Autosave: Autosave the point cloud when any annotations are done and moved to the next file.
 12. Views: shows the top, bottom, front, back, left, right and SW, SE, NW, NE isometric views with their shortcuts.
+13. Clone mode to copy the original point cloud content to annotated point cloud
 
 Best Practice: Apply contrast adjustments before extensive painting for consistency.
 
@@ -156,6 +157,7 @@ Best Practice: Apply contrast adjustments before extensive painting for consiste
 | Zoom                   | Z then +/−     | Or UI buttons                   |
 | Reset View             | R               | Re-applies preset               |
 | Eraser                 | E               | Restores original colors        |
+| Clone                  | C               | Clones original points          |
 | Undo / Redo            | Ctrl+Z / Ctrl+Y | Stroke granularity              |
 | Save                   | Ctrl+S          | Enhancement bake prompt         |
 | Autosave               |                 | Autosaves the annotations       |
