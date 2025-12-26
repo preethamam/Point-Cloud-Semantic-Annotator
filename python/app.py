@@ -58,6 +58,7 @@ class Annotator(QtWidgets.QMainWindow):
         self.setWindowTitle("Point Cloud Annotator")
         # State
         self.brush_size = 0.08
+        self.initial_loop_timer = 1.0 # seconds
         self.point_size = 6
         self.current_color = [255,0,0]
         self.history, self.redo_stack = [], []
@@ -69,6 +70,7 @@ class Annotator(QtWidgets.QMainWindow):
         self._session_edited = None  # set per cloud: np.bool_ mask
         self.annotation_alpha = 1.0  # 0..1
         self.repair_mode = False  # NEW
+        self.clone_mode = False
         self._is_closing = False
         
         self._shared_camera = None           # NEW: camera shared by left/right in repair
@@ -101,10 +103,15 @@ class Annotator(QtWidgets.QMainWindow):
         self._stroke_render_timer.setSingleShot(True)
         self._stroke_render_timer.timeout.connect(self._render_views_once)
         
+        # ——— Loop playback (Feature 2) ———
+        self._loop_timer = QtCore.QTimer(self)
+        self._loop_timer.setSingleShot(False)
+        self._loop_timer.timeout.connect(self._on_loop_tick)
+        
         # ——— Paint throttling (limit to ~120 FPS) ———
         self._paint_timer = QtCore.QElapsedTimer()
         self._paint_timer.start()
-        self._min_paint_ms = 8   # ~8 ms between paint batches (~120 Hz)
+        self._min_paint_ms = 8   # ~8 ms between paint batches (~120 Hz)    
         
         self._constrain_line = False   # Shift-drag = straight line
         self._anchor_xy = None         # (x,y) where the line started
@@ -213,6 +220,10 @@ class Annotator(QtWidgets.QMainWindow):
         sc_repair = QtWidgets.QShortcut(QKeySequence('Shift+R'), self)     # NEW
         sc_repair.setContext(QtCore.Qt.ApplicationShortcut)                # NEW
         sc_repair.activated.connect(lambda: self.repair_btn.toggle())
+        
+        sc_clone = QtWidgets.QShortcut(QKeySequence('C'), self)
+        sc_clone.setContext(QtCore.Qt.ApplicationShortcut)
+        sc_clone.activated.connect(lambda: self.clone_btn.toggle())
 
         # Restore state
         if STATE_FILE.exists():
@@ -586,14 +597,52 @@ class Annotator(QtWidgets.QMainWindow):
         ur.addWidget(self.eraser_btn)
         ur.addWidget(self.repair_btn)
         
-        # --- Previous / Next row (make each take 50%) ---
-        nav = QtWidgets.QHBoxLayout(); bp.addLayout(nav)
+        # --- Navigation + Clone + Loop block ---
+        nav_grid = QtWidgets.QGridLayout()
+        bp.addLayout(nav_grid)
+
+        # ===== Row 0 =====
+        self.clone_btn = QtWidgets.QPushButton('Clone (C)')
+        self.clone_btn.setCheckable(True)
+        self.clone_btn.setToolTip('Clone from Original to Annotation (C)')
+
+        self.goto_edit = QtWidgets.QLineEdit()
+        self.goto_edit.setPlaceholderText('Input PC Index and Press Enter')
+        self.goto_edit.setToolTip('Go to index (1-based)')
+        self.goto_edit.returnPressed.connect(self._on_goto_entered)
+
+        nav_grid.addWidget(self.clone_btn, 0, 0, 1, 2)     # col 0 + col 1
+        nav_grid.addWidget(self.goto_edit, 0, 2, 1, 2)     # col 2 + col 3
+
+        # ===== Row 1 =====
         self.prev_btn = QtWidgets.QPushButton('Previous')
         self.next_btn = QtWidgets.QPushButton('Next')
+
+        self.loop_btn = QtWidgets.QPushButton('Loop')
+        self.loop_btn.setCheckable(True)
+
+        self.loop_delay = QtWidgets.QDoubleSpinBox()
+        self.loop_delay.setRange(0.1, 60.0)
+        self.loop_delay.setSingleStep(0.1)
+        self.loop_delay.setValue(self.initial_loop_timer)
+        self.loop_delay.setSuffix(' s')
+
+        nav_grid.addWidget(self.prev_btn, 1, 0)
+        nav_grid.addWidget(self.next_btn, 1, 1)
+        nav_grid.addWidget(self.loop_btn, 1, 2)
+        nav_grid.addWidget(self.loop_delay, 1, 3)
+
+        # Column stretch (visual balance)
+        nav_grid.setColumnStretch(0, 1)
+        nav_grid.setColumnStretch(1, 1)
+        nav_grid.setColumnStretch(2, 1)
+        nav_grid.setColumnStretch(3, 1)
+
+        # Connections
         self.prev_btn.clicked.connect(self.on_prev)
         self.next_btn.clicked.connect(self.on_next)
-        nav.addWidget(self.prev_btn, 1)   # 50%
-        nav.addWidget(self.next_btn, 1)   # 50%
+        self.loop_btn.toggled.connect(self._toggle_loop)
+        self.clone_btn.toggled.connect(self.toggle_clone_mode)
 
         # --- Save / Autosave row mirrored under it ---
         save_autosave_row = QtWidgets.QHBoxLayout(); bp.addLayout(save_autosave_row)
@@ -610,11 +659,11 @@ class Annotator(QtWidgets.QMainWindow):
         self.autosave_chk.setChecked(True)
         save_autosave_row.addWidget(self.autosave_chk, 1, alignment=QtCore.Qt.AlignHCenter)        
 
-        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.alpha_slider,self.repair_btn,self.autosave_chk]: w.setEnabled(False)
+        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.alpha_slider,self.repair_btn,self.autosave_chk, self.clone_btn, self.goto_edit,self.loop_btn, self.loop_delay]: w.setEnabled(False)
 
 
     def _enable_controls(self):
-        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn,self.eraser_btn,self.gamma_slider,self.reset_contrast_btn,self.auto_contrast_btn,self.hist_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.open_ann_btn, self.open_orig_btn,self.alpha_slider,self.repair_btn,self.autosave_chk]: w.setEnabled(True)
+        for w in [self.annot_chk,self.view_combo,self.brush_slider,self.point_slider,self.color_btn,self.eraser_btn,self.gamma_slider,self.reset_contrast_btn,self.auto_contrast_btn,self.hist_btn]+self.swatches+[self.prev_btn,self.next_btn,self.undo_btn,self.redo_btn,self.save_btn,self.toggle_ann_chk,self.open_ann_btn, self.open_orig_btn,self.alpha_slider,self.repair_btn,self.autosave_chk,self.loop_btn,self.loop_delay,self.clone_btn,self.goto_edit]: w.setEnabled(True)
 
     def open_ann_folder(self):
         fol = QtWidgets.QFileDialog.getExistingDirectory(self, 'Select Annotation PC Folder')
@@ -957,7 +1006,20 @@ class Annotator(QtWidgets.QMainWindow):
         p.end()
 
         # Hotspot at the center of the ring
-        self.plotter.interactor.setCursor(QCursor(pix, r_eff + 2, r_eff + 2))
+        if self.clone_mode:
+            # Clone → cursor ONLY on Original (left)
+            self.plotter_ref.interactor.setCursor(QCursor(pix, r_eff + 2, r_eff + 2))
+            self.plotter.interactor.unsetCursor()
+
+        elif self.repair_mode:
+            # Repair → cursor ONLY on Annotated (right)
+            self.plotter.interactor.setCursor(QCursor(pix, r_eff + 2, r_eff + 2))
+            self.plotter_ref.interactor.unsetCursor()
+
+        else:
+            # Normal annotation
+            self.plotter.interactor.setCursor(QCursor(pix, r_eff + 2, r_eff + 2))
+            self.plotter_ref.interactor.unsetCursor()
 
 
     def change_brush(self, val):
@@ -1044,9 +1106,16 @@ class Annotator(QtWidgets.QMainWindow):
         self.history.append((idx, old))
         self.redo_stack.clear()
         # apply new color (eraser only when eraser is active)
-        if (self.eraser_btn.isChecked() or self.current_color is None):
+        if self.clone_mode:
+            # Clone: copy from original
             self.colors[idx] = self.original_colors[idx]
+
+        elif self.eraser_btn.isChecked() or self.current_color is None:
+            # Eraser: revert to original
+            self.colors[idx] = self.original_colors[idx]
+
         else:
+            # Normal paint
             self.colors[idx] = self.current_color
         
         self._session_edited[idx] = True
@@ -1062,23 +1131,77 @@ class Annotator(QtWidgets.QMainWindow):
             if edited:
                 self.on_save(_autosave=True)
 
+    def _on_goto_entered(self):
+        if not self.files:
+            return
+
+        text = self.goto_edit.text().strip()
+        if not text.isdigit():
+            self.goto_edit.clear()
+            self.setFocus()        # ← ADD THIS
+            return
+
+        idx = int(text) - 1
+        if idx < 0 or idx >= len(self.files):
+            self.goto_edit.clear()
+            self.setFocus()        # ← ADD THIS
+            return
+
+        self._maybe_autosave_before_nav()
+
+        self.index = idx
+        self.history.clear()
+        self.redo_stack.clear()
+        self.load_cloud()
+        self._position_overlays()
+
+        self.goto_edit.clear()
+        self.setFocus()            # ← ADD THIS
+
     def on_prev(self):
+        if not self.files:
+            return
+
+        self._maybe_autosave_before_nav()
+
         if self.index > 0:
-            self._maybe_autosave_before_nav()
             self.index -= 1
-            self.history.clear()
-            self.redo_stack.clear()
-            self.load_cloud()
-            self._position_overlays()
+        else:
+            # wrap around to last
+            self.index = len(self.files) - 1
+
+        self.history.clear()
+        self.redo_stack.clear()
+        self.load_cloud()
+        self._position_overlays()
 
     def on_next(self):
+        if not self.files:
+            return
+
+        self._maybe_autosave_before_nav()
+
         if self.index < len(self.files) - 1:
-            self._maybe_autosave_before_nav()
             self.index += 1
-            self.history.clear()
-            self.redo_stack.clear()
-            self.load_cloud()
-            self._position_overlays()
+        else:
+            # wrap around to first
+            self.index = 0
+
+        self.history.clear()
+        self.redo_stack.clear()
+        self.load_cloud()
+        self._position_overlays()
+
+    def _toggle_loop(self, on: bool):
+        if on:
+            delay_ms = int(self.loop_delay.value() * 1000)
+            self._loop_timer.start(delay_ms)
+        else:
+            self._loop_timer.stop()
+
+    def _on_loop_tick(self):
+        # behave exactly like pressing Next
+        self.on_next()
 
     def on_undo(self):
         if not self.history:
@@ -1213,7 +1336,16 @@ class Annotator(QtWidgets.QMainWindow):
             self._zoom_at_cursor_for(target, event.x(), event.y(), event.angleDelta().y())
             return True
 
-        if obj is self.plotter.interactor and self.annot_chk.isChecked():
+        if self.annot_chk.isChecked():
+            if self.clone_mode:
+                # Clone mode → ONLY allow painting on ORIGINAL (left) window
+                if obj is not self.plotter_ref.interactor:
+                    return False
+            else:
+                # Normal / Repair mode → ONLY paint on ANNOTATED (right) window
+                if obj is not self.plotter.interactor:
+                    return False
+        
             # 1) start stroke on LeftButtonPress
             if event.type() == QtCore.QEvent.MouseButtonPress \
             and event.button() == QtCore.Qt.LeftButton:
@@ -1275,9 +1407,16 @@ class Annotator(QtWidgets.QMainWindow):
                             if not idx:
                                 continue
                             self._stroke_idxs.update(idx)
-                            if (self.eraser_btn.isChecked() or self.current_color is None):
+                            if self.clone_mode:
+                                # Clone: copy from original
                                 self.colors[idx] = self.original_colors[idx]
+
+                            elif self.eraser_btn.isChecked() or self.current_color is None:
+                                # Eraser: revert to original
+                                self.colors[idx] = self.original_colors[idx]
+
                             else:
+                                # Normal paint
                                 self.colors[idx] = self.current_color
                             self._session_edited[idx] = True
                             touched_idx.append(idx)
@@ -1300,10 +1439,18 @@ class Annotator(QtWidgets.QMainWindow):
                         if not idx:
                             continue
                         self._stroke_idxs.update(idx)
-                        if (self.eraser_btn.isChecked() or self.current_color is None):
+                        if self.clone_mode:
+                            # Clone: copy from original
                             self.colors[idx] = self.original_colors[idx]
+
+                        elif self.eraser_btn.isChecked() or self.current_color is None:
+                            # Eraser: revert to original
+                            self.colors[idx] = self.original_colors[idx]
+
                         else:
+                            # Normal paint
                             self.colors[idx] = self.current_color
+
                         self._session_edited[idx] = True
                         touched_idx.append(idx)
                         changed_any = True
@@ -1491,6 +1638,10 @@ class Annotator(QtWidgets.QMainWindow):
         if base is None or len(base) != len(self.original_colors):
             base = self.original_colors
         return base
+    
+    def _clone_source(self):
+        """Color source for Clone mode."""
+        return self.original_colors
 
     def _on_toggle_ann_changed(self, state):
         self.annotations_visible = (state == QtCore.Qt.Checked)
@@ -1550,6 +1701,10 @@ class Annotator(QtWidgets.QMainWindow):
 
 
     def toggle_repair_mode(self, on: bool):
+        
+        if on and self.clone_mode:
+            self.clone_btn.setChecked(False)    # ← force exit Clone first
+        
         self.repair_mode = bool(on)
         self.plotter_ref.setVisible(self.repair_mode)
 
@@ -1590,7 +1745,40 @@ class Annotator(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._position_overlays)
         self._schedule_fit()
         self.update_annotation_visibility()
+    
+    def toggle_clone_mode(self, on: bool):
+        self.clone_mode = bool(on)
+        self.color_btn.setEnabled(not self.clone_mode)
         
+        if on and self.repair_mode:
+            self.repair_btn.setChecked(False)   # ← force exit Repair first
+        
+        if self.clone_mode:
+            # Ensure annotation tools are active (as you wanted)
+            self.annot_chk.setChecked(True)
+            self.toggle_ann_chk.setChecked(True)
+
+            # Show original (left) panel + title
+            self.plotter_ref.setVisible(True)
+            if hasattr(self, 'right_title'):
+                self.right_title.setVisible(True)
+
+            # ✅ KEY: use the same shared-camera behavior as Repair
+            self._link_cameras()
+
+        else:
+            # Stop sharing camera first (keeps current view)
+            self._unlink_cameras()
+
+            # Hide original panel + title
+            self.plotter_ref.setVisible(False)
+            if hasattr(self, 'right_title'):
+                self.right_title.setVisible(False)
+
+        # Layout + fit after the splitter settles
+        QtCore.QTimer.singleShot(0, self._finalize_layout)        
+        self.update_cursor()
+
     def closeEvent(self, e):
         self._is_closing = True  # block any future renders
 
@@ -1608,6 +1796,11 @@ class Annotator(QtWidgets.QMainWindow):
                     view.close()
             except Exception:
                 pass
+            
+        try:
+            self._loop_timer.stop()
+        except Exception:
+            pass
 
         super().closeEvent(e)
         
@@ -1661,7 +1854,7 @@ class Annotator(QtWidgets.QMainWindow):
         self._cam_pause = True          # NEW: pause cam observer effects
         # While rebuilding a file, unlink cameras so view changes don’t echo back
         try:
-            if self.repair_mode:
+            if self.repair_mode or getattr(self, 'clone_mode', False):
                 self._unlink_cameras()  # NEW
         except Exception:
             pass
@@ -1753,7 +1946,7 @@ class Annotator(QtWidgets.QMainWindow):
             if view:
                 view.interactor.setUpdatesEnabled(True)
         # Re-link cameras AFTER fit to avoid bounce
-        if self.repair_mode:
+        if self.repair_mode or getattr(self, 'clone_mode', False):
             self._link_cameras()            # NEW
         self._batch = False
         self._cam_pause = False             # NEW
