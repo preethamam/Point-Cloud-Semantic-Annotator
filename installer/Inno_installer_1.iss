@@ -2,7 +2,7 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 
 #define MyAppName "Point Cloud Annotator"
-#define MyAppVersion "1.7.0"
+#define MyAppVersion "2.0.0"
 #define MyAppPublisher "Preetham Manjunatha"
 #define MyAppURL "https://preethamam.github.io/"
 #define MyAppExeName "Point Cloud Annotator.exe"
@@ -38,7 +38,7 @@ DisableProgramGroupPage=yes
 ;PrivilegesRequired=lowest
 OutputDir=C:\Users\Preetham\Downloads
 OutputBaseFilename=Point Cloud Annotator
-SetupIconFile=D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\Executable\app.ico
+SetupIconFile=D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\Executable\icons\app.ico
 SolidCompression=yes
 WizardStyle=modern
 

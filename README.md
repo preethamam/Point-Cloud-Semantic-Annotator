@@ -1,321 +1,377 @@
-# Point Cloud Annotator
+# Point Cloud Annotator 2.0.0
 
-Semantic color annotation and visualization tool for 3D point clouds (PLY / PCD). Provides a high‑precision, screen‑space aware brush, color + contrast enhancement utilities, and an efficient workflow for reviewing large collections. State (last folder & file) and visual contexts are preserved between sessions for continuity.
+Semantic color annotation and review tool for PLY/PCD point clouds. Version 2.0.0 introduces a modular architecture, a ribbon-first UI, dual-view repair/clone workflows, thumbnail-based navigation, and a more precise WYSIWYG brush that respects screen-space point size.
 
 ![overview](assets/overview_01.png)
-![overview2](assets/overview_02.png)
-![overview3](assets/overview_03.png)
-![overview4](assets/overview_04.png)
+![overview](assets/overview_02.png)
+![overview](assets/overview_03.png)
+![overview](assets/overview_04.png)
 
 ---
 
 ## Table of Contents
 
 1. Overview
-2. Feature Matrix
-3. Architecture & Internals
-4. Installation
-5. Quick Start
-6. Detailed Usage
-7. Controls & Shortcuts
-8. Algorithms (Brush, Gamma, Auto Contrast, Histograms)
-9. Data Model & File I/O
-10. State & Persistence
-11. Packaging as an Executable
-12. Performance Tuning
-13. Troubleshooting & FAQ
-14. Extending & Customizing
-15. Roadmap / Ideas
-16. Contributing
-17. License
+2. What is New in 2.0.0
+3. Feature Matrix
+4. Folder Structure
+5. Installation
+6. Quick Start
+7. Workflow Guide
+8. UI Tour
+9. Controls and Shortcuts
+10. Algorithms and Rendering Details
+11. Data Model and File I/O
+12. State, Cache, and Persistence
+13. Architecture and Module Map
+14. Performance Tuning
+15. Packaging (Executable)
+16. Troubleshooting and FAQ
+17. Contributing
+18. License
 
 ---
 
 ## 1. Overview
 
-The application focuses on interactive semantic recoloring of unstructured point clouds. Instead of polygonal segmentation, it lets you “paint” semantic classes (represented as RGB colors) rapidly. High‑rate feedback is achieved by combining VTK picking with a cKDTree spatial pre‑index. Contrast tools enhance visual discrimination without overwriting painted data unless explicitly requested.
+Point Cloud Annotator is built for fast, high-precision semantic recoloring of point clouds. Instead of polygon segmentation, you paint per-point RGB labels directly on dense PLY/PCD data. The app emphasizes two goals:
+
+- Accurate brush footprints that match what you see on screen
+- Efficient review and navigation of large datasets
+
+You can load an annotation folder and (optionally) a matching original folder. The original folder is used for side-by-side comparison, clone/repair workflows, thumbnail generation, and annotation detection.
 
 ---
 
-## 2. Feature Matrix
+## 2. What is New in 2.0.0
 
-| Category          | Capabilities                                                                                                               |
-| ----------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Formats           | PLY (binary write), PCD (binary write), auto‑inject RGB channel if absent                                                 |
-| Painting          | Screen‑space circular brush, adjustable size, undo/redo, eraser, color swatches, custom color dialog, clone               |
-| Navigation        | Previous/Next file, natural sorting, view presets (Top‑Down / Isometric), zoom mode, reset camera, loop, jump to text box |
-| Display           | Adjustable point size, persistent overlays (index & filename), magenta brush cursor                                        |
-| Color Enhancement | Gamma slider (nonlinear mapping), Auto Contrast (percentile stretch), RGB histogram (original vs enhanced)                 |
-| Save Options      | Conditional application of enhanced (unpainted) colors on save (prompt)                                                    |
-| Persistence       | Last folder + file index stored via `appdirs` platform path                                                              |
-| Performance       | cKDTree region queries, hybrid world + screen filter for precise brush footprint                                           |
-
----
-
-## 3. Architecture & Internals
-
-High‑level components:
-
-- UI Layer (PyQt5): Main window, controls panel, sliders, buttons, dialogs.
-- Rendering Layer (PyVista / VTK): Point cloud actor, camera control, event integration.
-- Annotation Engine: Maintains current color, brush size, stroke lifecycle, undo/redo stacks.
-- Selection Subsystem: Combines VTK picking (projected point positions) with KD-tree radius queries and a final pixel-circle screen filter for accuracy.
-- Enhancement Module: Gamma mapping, percentile stretch (Auto Contrast), histogram (KDE) visualization.
-- Persistence Module: Lightweight JSON state file storing last dataset and index.
-
-Stroke Flow:
-
-1. Mouse press (left) in annotation mode ⇒ begin stroke; snapshot colors for undo.
-2. Mouse move (while pressed) ⇒ compute indices, recolor incrementally.
-3. Mouse release ⇒ push stroke diff (indices + previous colors) onto undo stack; clear redo stack.
-
-Undo/Redo Model: Arrays of `(indices, previous_color_values)`; redo stores the overwritten colors when an undo occurs.
-
-Data Structures:
-
-- `self.cloud`: PyVista PolyData
-- `self.colors`: Active working RGB (uint8)
-- `self.original_colors`: Baseline from file load
-- `self.enhanced_colors`: Contrast‑enhanced copy (only applied to untouched points)
-- `self.kdtree`: cKDTree of point positions for candidate region queries
+- Modular codebase under `python/` with separate UI, controllers, rendering, and services modules
+- Ribbon toolbar with grouped controls for navigation, annotation, color, enhancement, and view
+- Dual-pane split view for Repair and Clone modes with synchronized cameras
+- Annotation visibility alpha (blend between original and annotated colors)
+- Navigation dock with searchable list, thumbnails, and status dots (dirty/annotated)
+- Background thumbnail generation and persistent cache
+- Loop playback with configurable delay presets
+- More precise WYSIWYG brush footprint that accounts for point sprite size
+- Shift-drag straight line painting and stroke-level undo/redo
+- Robust state persistence for last folders, index, and dock width
 
 ---
 
-## 4. Installation
+## 3. Feature Matrix
 
-### 4.1 Requirements
+| Category    | Capabilities                                                          |
+| ----------- | --------------------------------------------------------------------- |
+| Formats     | PLY and PCD (binary write); auto-inject RGB channel if missing        |
+| Annotation  | Brush with adjustable size, eraser, undo/redo, per-stroke history     |
+| Precision   | Screen-space aware brush (point size aware), KD-tree candidate search |
+| Views       | Top, bottom, front, back, left, right, SW/SE/NW/NE isometrics         |
+| Split Mode  | Repair mode (side-by-side original + annotated) and Clone mode        |
+| Navigation  | Previous/Next, loop playback, quick index or filename search          |
+| Thumbnails  | Background generation, cache, and annotated/dirty indicators          |
+| Enhancement | Gamma slider, auto contrast, RGB histogram viewer                     |
+| Display     | Adjustable point size, overlay titles, annotation alpha               |
+| Persistence | Remembers folders, index, and nav dock width                          |
 
-- Python 3.8+ (tested with 3.10–3.12 recommended)
-- OpenGL 2.1+ capable GPU & drivers (for VTK)
-- Windows / Linux / macOS (primary development on Windows)
+---
 
-### 4.2 Dependencies (Runtime)
+## 4. Folder Structure
 
-`pyvista`, `pyvistaqt`, `vtk`, `PyQt5`, `numpy`, `scipy`, `matplotlib`, `appdirs`
+```
+Point Cloud Annotator/
+├─ README.md
+├─ LICENSE
+├─ assets/
+│  ├─ overview_01.png
+│  ├─ overview_02.png
+│  ├─ overview_03.png
+│  └─ overview_04.png
+├─ python/
+│  ├─ app.py
+│  ├─ requirements.txt
+│  ├─ configs/
+│  │  ├─ __init__.py
+│  │  └─ constants.py
+│  ├─ controllers/
+│  │  ├─ __init__.py
+│  │  ├─ annotation.py
+│  │  ├─ app_helpers.py
+│  │  ├─ bootstrap.py
+│  │  ├─ interaction.py
+│  │  ├─ io.py
+│  │  ├─ nav_ui.py
+│  │  ├─ navigation.py
+│  │  └─ ui_controls.py
+│  ├─ rendering/
+│  │  ├─ __init__.py
+│  │  └─ camera.py
+│  ├─ services/
+│  │  ├─ __init__.py
+│  │  ├─ annotation_state.py
+│  │  ├─ storage.py
+│  │  └─ thumbnail.py
+│  ├─ ui/
+│  │  ├─ __init__.py
+│  │  ├─ icons.py
+│  │  ├─ layout.py
+│  │  ├─ menu.py
+│  │  ├─ nav_dock.py
+│  │  ├─ overlays.py
+│  │  └─ ribbon.py
+│  └─ icons/
+│     ├─ app.png
+│     ├─ app.ico
+│     ├─ annotate.png
+│     ├─ clone.png
+│     ├─ contrast.png
+│     ├─ eraser.png
+│     ├─ histogram.png
+│     ├─ loop.png
+│     ├─ next.png
+│     ├─ previous.png
+│     ├─ repair.png
+│     ├─ reset.png
+│     ├─ reset-contrast.png
+│     ├─ view.png
+│     ├─ zoom-in.png
+│     └─ zoom-out.png
+├─ installer/ (optional)
+└─ Archive/ (optional)
+```
 
-### 4.3 Recommended Dev Extras
+---
 
-`black`, `flake8`, `pyinstaller`, `auto-py-to-exe`
+## 5. Installation
 
-### 4.4 Install (Virtual Environment)
+### 5.1 Requirements
+
+- Python 3.9+ (3.10-3.12 recommended)
+- OpenGL 2.1+ capable GPU and drivers for VTK
+- Windows, macOS, or Linux
+
+### 5.2 Install (Virtual Environment)
+
+From the repo root:
 
 ```pwsh
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install -r python\requirements.txt
 ```
 
-If no `requirements.txt` is present:
+---
+
+## 6. Quick Start
 
 ```pwsh
-pip install pyvista pyvistaqt vtk PyQt5 numpy scipy matplotlib appdirs
+python python\app.py
 ```
+
+Then:
+
+1. Open an annotation folder with PLY/PCD files.
+2. (Optional) Open an original folder with matching filenames for comparison.
+3. Enable annotation mode and start painting.
 
 ---
 
-## 5. Quick Start
+## 7. Workflow Guide
+
+### 7.1 Annotation and Original Folders
+
+- Annotation folder: where you read and write the annotated PLY/PCD files.
+- Original folder (optional): used for repair/clone workflows, thumbnails, and annotation detection.
+
+If an original file exists and matches point count, its RGB values are treated as the true baseline when computing edits.
+
+### 7.2 Save Behavior
+
+- Manual save prompts whether to bake enhanced (gamma/contrast) colors into untouched points.
+- Autosave can be enabled from the File menu. If on, the app saves before navigation when edits exist.
+
+---
+
+## 8. UI Tour
+
+### 8.1 Ribbon
+
+- Navigation: prev/next, loop toggle, delay presets
+- Annotation: alpha, brush size, point size
+- Color: quick swatches and color picker
+- Edit: annotation mode, eraser, repair, clone
+- Enhancement: gamma slider, auto contrast, histograms
+- View: reset view, zoom, view presets, show annotations
+
+### 8.2 Navigation Dock
+
+- Search by index (1-based) or partial filename
+- Thumbnail list with dirty and annotated indicators
+- Fast single-click navigation
+
+### 8.3 Overlays
+
+- Titles for original and annotated viewports
+- Status bar for file index, loop state, and thumbnail progress
+
+---
+
+## 9. Controls and Shortcuts
+
+| Action                 | Shortcut                 | Notes                            |
+| ---------------------- | ------------------------ | -------------------------------- |
+| Open Annotation Folder | Menu                     | File menu                        |
+| Open Original Folder   | Menu                     | File menu                        |
+| Save                   | Ctrl+S                   | Optional bake of enhanced colors |
+| Autosave               | Menu toggle              | File menu                        |
+| Undo / Redo            | Ctrl+Z / Ctrl+Y          | Per-stroke                       |
+| Annotation Mode        | Ctrl+A                   | Enable brush painting            |
+| Show Annotations       | Shift+A                  | Toggle annotation overlay        |
+| Eraser                 | E                        | Restores original colors         |
+| Repair Mode            | Shift+R                  | Split view + eraser default      |
+| Clone Mode             | C                        | Paint from original colors       |
+| Brush Size             | B then +/-               | 1-200 px                         |
+| Point Size             | D then +/-               | 1-20 px                          |
+| Annotation Alpha       | A then +/-               | 0-100 percent                    |
+| Gamma                  | G then +/-               | 0.1x to 3.0x                     |
+| Zoom                   | Z then +/-               | Cursor-centered zoom             |
+| Reset View             | R                        | Reset camera                     |
+| Views                  | Ctrl+T/B/F/V/L/R/W/E/I/O | Presets                          |
+| Previous / Next        | Left / Right             | Wraps                            |
+| First / Last           | Home / End               | -                                |
+| Page Jump              | PgUp / PgDown            | +/-10                            |
+| Loop Playback          | L                        | Delay set in ribbon              |
+| Toggle Nav Pane        | N                        | Show or hide dock                |
+| Straight Line Paint    | Shift + Drag             | Constrained stroke               |
+
+---
+
+## 10. Algorithms and Rendering Details
+
+### 10.1 WYSIWYG Brush Selection
+
+1. Pick center point with `vtkPropPicker`.
+2. Estimate world size for one screen pixel.
+3. Query a KD-tree for candidate points within an inflated radius.
+4. Project candidates to screen and keep only those fully inside the brush circle.
+
+This produces a footprint that matches the on-screen brush ring and respects point sprite size.
+
+### 10.2 Stroke Engine
+
+- Freehand strokes are stamped along the path at a fixed fraction of brush size.
+- Shift + drag constrains strokes to a straight line, still stamped for coverage.
+- Undo/redo stores the entire set of indices and previous colors per stroke.
+
+### 10.3 Gamma and Auto Contrast
+
+- Gamma is applied after per-channel normalization.
+- Auto contrast stretches 2nd to 98th percentiles.
+- Only untouched points are updated to preserve painted edits.
+
+### 10.4 Annotation Alpha
+
+Annotation alpha blends between the enhanced base and the painted colors without destroying data.
+
+---
+
+## 11. Data Model and File I/O
+
+- `RGB` is stored as uint8, shape `(N, 3)`.
+- Missing RGB is created as zeros on load.
+- PLY saves use `vtkPLYWriter` in binary mode.
+- PCD saves use `PyVista.save(binary=True)`.
+
+Optional original folder:
+
+- If a matching file exists with the same point count, it is used as the baseline.
+- This baseline drives clone/repair and annotation detection logic.
+
+---
+
+## 12. State, Cache, and Persistence
+
+### 12.1 State File
+
+Stored via `appdirs.user_data_dir`:
+
+- `state.json` contains the last annotation folder, original folder, file index, and nav dock width.
+
+### 12.2 Thumbnail Cache
+
+- Thumbnails are generated off-screen with PyVista and stored in `thumbs/` under the same app data dir.
+- Cache can be cleared from the File menu.
+- Cache is pruned automatically when original datasets change.
+
+---
+
+## 13. Architecture and Module Map
+
+- `python/app.py`: Entry point and main `Annotator` window
+- `python/controllers/`: Interaction, painting, navigation, and I/O
+- `python/ui/`: Ribbon, menus, navigation dock, overlays
+- `python/rendering/`: Camera control and view synchronization
+- `python/services/`: State storage, thumbnail generation, annotation detection
+- `python/configs/`: Constants and app directories
+
+---
+
+## 14. Performance Tuning
+
+- Reduce brush size for ultra-dense clouds.
+- Lower point size for faster redraw in heavy scenes.
+- Use downsampled clouds for annotation, then transfer colors by nearest neighbor.
+- Keep the original folder on a fast disk to speed thumbnail generation.
+
+---
+
+## 15. Packaging (Executable)
+
+### 15.1 PyInstaller (example)
+
+From the repo root:
 
 ```pwsh
-python .\app.py
+pyinstaller --noconfirm --onedir --windowed --icon "\python\icons\app.ico" --contents-directory "." --add-data "\python\configs;configs/" --add-data "\python\controllers;controllers/" --add-data "\python\icons;icons/" --add-data "\python\rendering;rendering/" --add-data "\python\services;services/" --add-data "\python\ui;ui/"  "\python\app.py"
 ```
 
-Click "Open Folder" → select directory with `.ply` or `.pcd` point clouds → enable Annotation Mode (A) → Paint.
+If you add other assets, include them with `--add-data` as needed.
 
 ---
 
-## 6. Detailed Usage
+## 16. Troubleshooting and FAQ
 
-1. Open Dataset: Loads and natural‑sorts all `*.ply` + `*.pcd` in selected folder.
-2. Inspect: Choose Top‑Down for orthographic feel or Isometric for context.
-3. Enable Annotation Mode: (A) toggles painting vs free camera navigation.
-4. Choose Color: Swatch or dialog. Active color applied to brush; set Eraser (E) to restore original.
-5. Adjust Brush: Slider or press B then +/−. Cursor ring updates live.
-6. Paint: Click‑drag (left). Each stroke forms one undo unit.
-7. Point Size: Adjust for density readability (1–20).
-8. Contrast Handling:
-   - Gamma: Nonlinear scaling, only affecting unpainted points.
-   - Auto Contrast: Percentile stretch (2–98%) applied only to untouched points.
-   - Histograms: Compare original vs enhanced to verify adjustments.
-9. Navigation: Previous / Next; overlays show progress count and filename.
-10. Save: Ctrl+S → Prompt decides whether to bake enhanced colors into untouched points.
-11. Autosave: Autosave the point cloud when any annotations are done and moved to the next file.
-12. Views: shows the top, bottom, front, back, left, right and SW, SE, NW, NE isometric views with their shortcuts.
-13. Clone mode to copy the original point cloud content to annotated point cloud
+| Issue                          | Cause                      | Resolution                                |
+| ------------------------------ | -------------------------- | ----------------------------------------- |
+| Blank render window            | OpenGL or driver issue     | Update GPU drivers, test basic VTK script |
+| Slow painting                  | Dense cloud or large brush | Reduce brush size, downsample             |
+| Thumbnails not showing         | Cache not built yet        | Wait for background worker or clear cache |
+| Enhanced colors missing        | Save option set to No      | Re-save and choose Yes                    |
+| Zoom feels jumpy in split view | Cameras are linked         | Use smaller steps or reset view           |
 
-Best Practice: Apply contrast adjustments before extensive painting for consistency.
+FAQ:
+
+Q: Can I export class IDs instead of RGB?
+A: Not in 2.0.0. The app stores semantics as RGB. You can maintain a color-to-class mapping externally.
+
+Q: How do I adjust auto-contrast percentiles?
+A: Edit `apply_auto_contrast` in `python/controllers/annotation.py`.
 
 ---
 
-## 7. Controls & Shortcuts
+## 17. Contributing
 
-| Action                 | Shortcut        | Notes                           |
-| ---------------------- | --------------- | ------------------------------- |
-| Toggle Annotation Mode | A               | Enables brush & cursor          |
-| Brush Size             | B then +/−     | Pixel radius 1–200             |
-| Point Size             | D then +/−     | Display only                    |
-| Zoom                   | Z then +/−     | Or UI buttons                   |
-| Reset View             | R               | Re-applies preset               |
-| Eraser                 | E               | Restores original colors        |
-| Clone                  | C               | Clones original points          |
-| Undo / Redo            | Ctrl+Z / Ctrl+Y | Stroke granularity              |
-| Save                   | Ctrl+S          | Enhancement bake prompt         |
-| Autosave               |                 | Autosaves the annotations       |
-| Previous / Next File   | ← / →         | Natural ordering                |
-| Pick Color Dialog      | (Button)        | QColorDialog                    |
-| Top view               | Ctrl+T          | Shows orthographic top view     |
-| Bottom view            | Ctrl+B          | Shows orthographic bottom view  |
-| Front view             | Ctrl+F          | Shows orthographic front view   |
-| Back view              | Ctrl+V          | Shows orthographic back view    |
-| Left view              | Ctrl+L          | Shows orthographic left view    |
-| Right view             | Ctrl+R          | Shows orthographic right view   |
-| SW Isometric view      | Ctrl+W          | Shows southwest isometric view |
-| SE isometric view      | Ctrl+E          | Shows southeast isometric view |
-| NW isometric view      | Ctrl+I          | Shows northwest isometric view |
-| NE isometric view     | Ctrl+O          | Shows northeast isometric view |
+1. Fork and create a feature branch.
+2. Keep PRs focused and include screenshots for UI changes.
+3. Format with `black` and follow PEP 8.
 
----
-
-## 8. Algorithms
-
-### 8.1 Brush Selection
-
-1. Center pick with `vtkPropPicker`.
-2. Sample along circle to estimate equivalent world radius.
-3. KD-tree query for candidate points.
-4. Project candidates to screen; retain those inside pixel circle.
-
-### 8.2 Gamma Mapping
-
-`gamma = 2 ** ((slider_value - 100)/50)`; apply exponent after per-channel min/max normalization. Only untouched points updated.
-
-### 8.3 Auto Contrast
-
-Per-channel percentile stretch (2–98%). Untouched update policy identical to gamma.
-
-### 8.4 Histograms
-
-Gaussian KDE per channel for original and enhanced frames.
-
-### 8.5 Undo/Redo
-
-Stacks store (indices, prior_colors). Redo populated on undo; cleared on any new stroke.
-
----
-
-## 9. Data Model & File I/O
-
-- Working array: `RGB` uint8 (N×3).
-- Missing `RGB`: synthesized (zeros) on load.
-- Save:
-  - PLY: `vtkPLYWriter` binary with `RGB`.
-  - PCD: PyVista `.save(binary=True)`.
-  - Enhancement prompt merges `enhanced_colors` into untouched points if confirmed.
-
----
-
-## 10. State & Persistence
-
-- JSON file using `appdirs.user_data_dir(APP_NAME)`.
-- Keys: `directory`, `index`.
-- Safe bounds check protects against removed files.
-
-Remove the state file to reset startup behavior.
-
----
-
-## 11. Packaging as an Executable
-
-### 11.1 PyInstaller
-
-```pwsh
-pyinstaller --noconfirm --name PointCloudAnnotator --icon icon.png --add-data "icon.png;." --hidden-import vtkmodules.all app.py
-```
-
-### 11.2 auto-py-to-exe
-
-Use GUI to configure the same options; include additional data/icon and hidden imports as needed.
-
-### 11.3 Common Issues
-
-- Missing Qt plugins → add plugin dir via `--add-data`.
-- Large bundle → prune unused VTK IO modules; optionally UPX compress.
-
----
-
-## 12. Performance Tuning
-
-- Reduce brush size for massive clouds to limit candidate queries.
-- Lower point size to mitigate overdraw in dense scenes.
-- Downsample for annotation; propagate colors back with nearest neighbor mapping.
-- Close other GPU intensive applications.
-
----
-
-## 13. Troubleshooting & FAQ
-
-| Issue                                         | Cause              | Resolution                                    |
-| --------------------------------------------- | ------------------ | --------------------------------------------- |
-| Blank window                                  | OpenGL fallback    | Update drivers / test simple VTK script       |
-| Slow painting                                 | Very dense cloud   | Downsample; ensure SciPy wheels optimized     |
-| Colors missing after save                     | File write blocked | Check permissions / disk space                |
-| Enhanced colors not applied to painted points | By design          | Use Eraser to revert then reapply enhancement |
-| Histogram window hidden                       | Behind main window | Alt+Tab or minimize main window temporarily   |
-
-### FAQ
-
-Q: How to export class IDs?
-A: Future feature—current version encodes semantics as RGB only. Consider maintaining an external color→class mapping file.
-
-Q: Can I change percentile stretch?
-A: Edit `p_low` / `p_high` values in `apply_auto_contrast()`.
-
-Q: Add LAS/LAZ?
-A: Convert via PDAL or CloudCompare to PLY/PCD first.
-
----
-
-## 14. Extending & Customizing
-
-Hook points:
-
-- Brush logic: `_compute_brush_idx`, painting blocks in `eventFilter`.
-- Contrast: `on_gamma_change`, `apply_auto_contrast`, `reset_contrast`.
-- Save pipeline: `on_save`.
-
-Ideas:
-
-- Class legend export (JSON/CSV).
-- Multi-selection rectangle or lasso tool.
-- Batch enhancement processing.
-- Per-class mask export (int label array alongside RGB).
-
----
-
-## 15. Roadmap / Ideas
-
-- Export per-point integer labels.
-- Batch non-interactive contrast mode.
-- Palette recommendation system.
-- File bookmarking & session notes.
-
----
-
-## 16. Contributing
-
-1. Fork repository & create a feature branch.
-2. Keep PRs focused; include screenshots for UI changes.
-3. Follow PEP8 (auto-format with `black`).
-4. Describe performance implications of heavy loops.
-
-Bug Report Template:
+Bug report template:
 
 ```
-Environment:
-	OS:
-	Python:
-	GPU/Driver:
-Steps to Reproduce:
+OS:
+Python:
+GPU/Driver:
+Steps:
 Expected:
 Actual:
 Sample Data (if possible):
@@ -323,6 +379,6 @@ Sample Data (if possible):
 
 ---
 
-## 17. License
+## 18. License
 
-MIT License © 2025 Preetham Manjunatha. See `LICENSE` for details.
+MIT License. See `LICENSE` for details.
