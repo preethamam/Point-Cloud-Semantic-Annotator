@@ -27,6 +27,7 @@ Usage:
 """
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -36,7 +37,6 @@ import matplotlib
 matplotlib.use("Qt5Agg")
 import hashlib
 import threading
-from concurrent.futures import ThreadPoolExecutor
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,7 +45,7 @@ from appdirs import user_data_dir
 from joblib import Parallel, delayed
 from PIL import Image
 from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtGui import QColor, QCursor, QIcon, QKeySequence, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QCursor, QIcon, QKeySequence, QPainter, QPixmap, QPen
 from pyvistaqt import QtInteractor
 from scipy.spatial import cKDTree
 from scipy.stats import gaussian_kde
@@ -61,11 +61,15 @@ STATE_FILE = state_dir / "state.json"
 THUMB_DIR = state_dir / "thumbs"
 THUMB_DIR.mkdir(parents=True, exist_ok=True)
 THUMB_SIZE = 96   # pixels (safe, fast, clean)
+PERCENTAGE_CORE_FACTOR = 0.80
+THUMB_N_JOBS = max(1, int((os.cpu_count() or 1) * PERCENTAGE_CORE_FACTOR))
+THUMB_BACKEND = "loky"
 
 # ─── Nav dock tuning ───────────────────────────
 NAV_THUMB_SIZE   = THUMB_SIZE      # thumbnail image size
 NAV_NAME_MAX     = 30      # max filename chars under thumbnail
 NAV_DOCK_WIDTH   = 155     # px (adjust to taste)
+RIBBON_ENH_VIEW_HEIGHT = 88
 
 
 def _is_annotated_pair(ann_path: Path, orig_path: Path) -> bool:
@@ -86,6 +90,52 @@ def _is_annotated_pair(ann_path: Path, orig_path: Path) -> bool:
     except Exception:
         return False
 
+def _generate_thumbnail_job(path: Path, out_png: Path, size=96):
+    """
+    Generate a thumbnail PNG for a point cloud.
+    Runs in background worker. No Qt calls allowed here.
+    """
+    try:
+        pc = pv.read(str(path))
+        if pc.n_points == 0:
+            return
+
+        plotter = pv.Plotter(off_screen=True, window_size=(size, size))
+        plotter.set_background("white")
+
+        if "RGB" in pc.array_names:
+            plotter.add_points(pc, scalars="RGB", rgb=True, point_size=4)
+        else:
+            plotter.add_points(pc, color="gray", point_size=4)
+
+        # --- Top-down orthographic view (no zoom, no border) ---
+        cam = plotter.camera
+        cam.ParallelProjectionOn()
+        cam.SetViewUp(0, 1, 0)
+
+        xmin, xmax, ymin, ymax, zmin, zmax = pc.bounds
+        cx = 0.5 * (xmin + xmax)
+        cy = 0.5 * (ymin + ymax)
+        cz = 0.5 * (zmin + zmax)
+
+        cam.SetFocalPoint(cx, cy, cz)
+        cam.SetPosition(cx, cy, zmax + (zmax - zmin + 1e-3))
+
+        xr = xmax - xmin
+        yr = ymax - ymin
+        cam.SetParallelScale(0.5 * max(xr, yr))
+
+        plotter.reset_camera_clipping_range()
+
+        img = plotter.screenshot(transparent_background=False)
+        plotter.close()
+
+        img = img[:, :, :3].astype(np.uint8)
+        Image.fromarray(img).save(out_png)
+
+    except Exception:
+        pass
+
 class RibbonGroup(QtWidgets.QFrame):
     """
     Compact ribbon group:
@@ -94,7 +144,7 @@ class RibbonGroup(QtWidgets.QFrame):
       - add(widget): full-row widget (buttons, checkboxes, etc.)
       - add_row("Label", widget, trailing_widget=None): label+control row
     """
-    def __init__(self, title: str, width=150, parent=None):
+    def __init__(self, title: str, width=150, parent=None, title_position="bottom"):
         super().__init__(parent)
 
         self.setFixedWidth(width)
@@ -111,7 +161,7 @@ class RibbonGroup(QtWidgets.QFrame):
         """)
 
         outer = QtWidgets.QVBoxLayout(self)
-        outer.setContentsMargins(6, 4, 6, 4)   # tighter margins
+        outer.setContentsMargins(6, 4, 6, 4)
         outer.setSpacing(3)
 
         # Grid for compact rows
@@ -121,8 +171,6 @@ class RibbonGroup(QtWidgets.QFrame):
         self.grid.setHorizontalSpacing(6)
         self.grid.setVerticalSpacing(3)
         self.grid.setColumnStretch(1, 1)  # control column stretches
-        outer.addWidget(self.controls, 1)
-
         # Plain bottom title (no box)
         self.title_lbl = QtWidgets.QLabel(title, self)
         self.title_lbl.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
@@ -135,7 +183,12 @@ class RibbonGroup(QtWidgets.QFrame):
                 border: none;
             }
         """)
-        outer.addWidget(self.title_lbl, 0)
+        if title_position == "top":
+            outer.addWidget(self.title_lbl, 0)
+            outer.addWidget(self.controls, 1)
+        else:
+            outer.addWidget(self.controls, 1)
+            outer.addWidget(self.title_lbl, 0)
 
         self._row = 0
 
@@ -177,8 +230,8 @@ class Annotator(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
         # Icon and window
-        icon = Path(__file__).parent / 'icon.png'
-        if not icon.exists(): icon = Path(__file__).parent / 'app.ico'
+        icon = Path(__file__).parent / 'icons' / 'app.png'
+        if not icon.exists(): icon = Path(__file__).parent / 'icons' / 'app.ico'
         if icon.exists(): self.setWindowIcon(QIcon(str(icon)))
         self.setWindowTitle("Point Cloud Annotator")
         
@@ -235,6 +288,8 @@ class Annotator(QtWidgets.QMainWindow):
         self._batch = False
         self._cam_pause = False      # NEW: pause camera-sync renders during loads
         self._in_zoom = False          # reentrancy guard for atomic zoom
+        self._view_change_active = False
+        self._need_split_fit = False   # NEW: fit both views after split
 
         self._fit_pad = 1.08  # camera fit padding factor
         
@@ -265,9 +320,11 @@ class Annotator(QtWidgets.QMainWindow):
         self._in_stroke       = False
         
         # PATCH 5: thumbnail backend (NO UI)
-        self._thumb_pool = ThreadPoolExecutor(max_workers=2)
         self._thumb_lock = threading.Lock()
-        self._thumb_futures = {}   # idx -> Future
+        self._thumb_job_set = set()        # (src_path, out_png)
+        self._thumb_out_by_idx = {}        # idx -> out_png
+        self._thumb_worker_running = False
+        self._thumb_worker_start_pending = False
 
         self._stroke_render_timer = QtCore.QTimer(self)
         self._stroke_render_timer.setSingleShot(True)
@@ -756,25 +813,229 @@ class Annotator(QtWidgets.QMainWindow):
         help_menu.addAction(act_about)
         
     
+    def _make_icon(self, size, draw_fn):
+        pix = QPixmap(size, size)
+        pix.fill(QtCore.Qt.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        draw_fn(painter, size)
+        painter.end()
+        return QIcon(pix)
+
+    def _icon_from_file(self, filename):
+        icon_path = Path(__file__).parent / "icons" / filename
+        if not icon_path.exists():
+            return None
+        icon = QIcon(str(icon_path))
+        if icon.isNull():
+            return None
+        return icon
+
+    def _icon_pencil(self):
+        icon = self._icon_from_file("annotate.png")
+        if icon is not None:
+            return icon
+
+        def draw(p, s):
+            p.setPen(QPen(QColor("#2b2b2b"), 2, QtCore.Qt.SolidLine,
+                          QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+            p.drawLine(3, s - 3, s - 3, 3)
+            p.setPen(QPen(QColor("#d28b36"), 2, QtCore.Qt.SolidLine,
+                          QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+            p.drawLine(5, s - 5, s - 5, 5)
+        return self._make_icon(16, draw)
+
+    def _icon_eraser(self):
+        icon = self._icon_from_file("eraser.png")
+        if icon is not None:
+            return icon
+
+        def draw(p, s):
+            p.setPen(QPen(QColor("#2b2b2b"), 1.5))
+            p.setBrush(QColor("#f2b07b"))
+            p.drawRoundedRect(3, 6, 10, 6, 2, 2)
+            p.setPen(QPen(QColor("#ffffff"), 1.2))
+            p.drawLine(4, 7, 12, 11)
+        return self._make_icon(16, draw)
+
+    def _icon_repair(self):
+        icon = self._icon_from_file("repair.png")
+        if icon is not None:
+            return icon
+
+        def draw(p, s):
+            p.setPen(QPen(QColor("#2b2b2b"), 1.8, QtCore.Qt.SolidLine,
+                          QtCore.Qt.RoundCap))
+            p.drawEllipse(2, 2, 6, 6)
+            p.drawLine(7, 7, 13, 13)
+            p.drawLine(10, 12, 13, 9)
+        return self._make_icon(16, draw)
+
+    def _icon_clone(self):
+        icon = self._icon_from_file("clone.png")
+        if icon is not None:
+            return icon
+
+        def draw(p, s):
+            p.setPen(QPen(QColor("#2b2b2b"), 1.5))
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawRect(3, 5, 8, 8)
+            p.drawRect(6, 2, 8, 8)
+        return self._make_icon(16, draw)
+
+    def _icon_palette(self):
+        def draw(p, s):
+            p.setPen(QPen(QColor("#2b2b2b"), 1.2))
+            p.setBrush(QColor("#f0d1a0"))
+            p.drawEllipse(2, 2, 12, 12)
+            p.setBrush(QColor("#d9534f"))
+            p.drawEllipse(5, 5, 2, 2)
+            p.setBrush(QColor("#5bc0de"))
+            p.drawEllipse(9, 5, 2, 2)
+            p.setBrush(QColor("#5cb85c"))
+            p.drawEllipse(7, 9, 2, 2)
+        return self._make_icon(16, draw)
+
+    def _icon_contrast(self):
+        icon = self._icon_from_file("contrast.png")
+        if icon is not None:
+            return icon
+
+        def draw(p, s):
+            rect = QtCore.QRectF(2, 2, 12, 12)
+            p.setPen(QPen(QColor("#2b2b2b"), 1.2))
+            p.setBrush(QColor("#222222"))
+            p.drawPie(rect, 90 * 16, 180 * 16)
+            p.setBrush(QColor("#ffffff"))
+            p.drawPie(rect, -90 * 16, 180 * 16)
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawEllipse(rect)
+        return self._make_icon(16, draw)
+
+    def _icon_reset_view(self):
+        icon = self._icon_from_file("reset.png")
+        if icon is not None:
+            return icon
+        return self.style().standardIcon(QtWidgets.QStyle.SP_DialogResetButton)
+
+    def _icon_hist(self):
+        icon = self._icon_from_file("histogram.png")
+        if icon is not None:
+            return icon
+
+        def draw(p, s):
+            p.setPen(QPen(QColor("#2b2b2b"), 1.2))
+            p.setBrush(QColor("#7aa7d9"))
+            p.drawRect(3, 7, 3, 6)
+            p.setBrush(QColor("#5cb85c"))
+            p.drawRect(7, 4, 3, 9)
+            p.setBrush(QColor("#f0ad4e"))
+            p.drawRect(11, 6, 3, 7)
+        return self._make_icon(16, draw)
+
+    def _icon_prev(self):
+        icon = self._icon_from_file("previous.png")
+        if icon is not None:
+            return icon
+        return self.style().standardIcon(QtWidgets.QStyle.SP_ArrowBack)
+
+    def _icon_next(self):
+        icon = self._icon_from_file("next.png")
+        if icon is not None:
+            return icon
+        return self.style().standardIcon(QtWidgets.QStyle.SP_ArrowForward)
+
+    def _icon_loop(self):
+        icon = self._icon_from_file("loop.png")
+        if icon is not None:
+            return icon
+        return self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload)
+
+    def _icon_reset_contrast(self):
+        icon = self._icon_from_file("reset-contrast.png")
+        if icon is not None:
+            return icon
+        return self.style().standardIcon(QtWidgets.QStyle.SP_DialogResetButton)
+
+    def _icon_eye(self):
+        icon = self._icon_from_file("view.png")
+        if icon is not None:
+            return icon
+
+        def draw(p, s):
+            p.setPen(QPen(QColor("#2b2b2b"), 1.2))
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawEllipse(2, 5, 12, 6)
+            p.setBrush(QColor("#2b2b2b"))
+            p.drawEllipse(7, 7, 2, 2)
+        return self._make_icon(16, draw)
+
+    def _icon_zoom(self, plus=True):
+        if plus:
+            icon = self._icon_from_file("zoom-in.png")
+        else:
+            icon = self._icon_from_file("zoom-out.png")
+        if icon is not None:
+            return icon
+
+        def draw(p, s):
+            p.setPen(QPen(QColor("#2b2b2b"), 1.2))
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawEllipse(2, 2, 9, 9)
+            p.drawLine(9, 9, 14, 14)
+            p.drawLine(5, 6, 9, 6)
+            if plus:
+                p.drawLine(7, 4, 7, 8)
+        return self._make_icon(16, draw)
+
+    def _ribbon_button(self, icon, tooltip, checkable=False, icon_size=14, button_size=22):
+        btn = QToolButton()
+        btn.setIcon(icon)
+        btn.setIconSize(QtCore.QSize(icon_size, icon_size))
+        btn.setToolTip(tooltip)
+        btn.setCheckable(checkable)
+        btn.setAutoRaise(True)
+        btn.setFixedSize(button_size, button_size)
+        btn.setStyleSheet("""
+            QToolButton { padding: 1px; }
+            QToolButton:checked {
+                background: #d0e7ff;
+                border: 1px solid #7aa7d9;
+                border-radius: 3px;
+            }
+        """)
+        return btn
+
     def _build_ribbon(self):
         ribbon = QtWidgets.QWidget(self)
-        ribbon.setFixedHeight(140)  # less height; better real estate
+        ribbon.setFixedHeight(130)
         ribbon.setStyleSheet("background:#efefef;")
 
         h = QtWidgets.QHBoxLayout(ribbon)
         h.setContentsMargins(6, 4, 6, 4)
         h.setSpacing(6)
+        h.setAlignment(QtCore.Qt.AlignTop)
 
         # ───────────────── Navigation ─────────────────
-        nav = RibbonGroup("Navigation", 130)
+        nav = RibbonGroup("Navigation", 130, title_position="top")
 
-        btn_prev = QtWidgets.QPushButton("◀ Prev")
+        btn_prev = self._ribbon_button(
+            self._icon_prev(),
+            "Previous (Left Arrow)"
+        )
         btn_prev.clicked.connect(self.on_prev)
 
-        btn_next = QtWidgets.QPushButton("Next ▶")
+        btn_next = self._ribbon_button(
+            self._icon_next(),
+            "Next (Right Arrow)"
+        )
         btn_next.clicked.connect(self.on_next)
 
-        chk_loop = QtWidgets.QCheckBox("Loop")
+        chk_loop = self._ribbon_button(
+            self._icon_loop(),
+            "Loop playback",
+            checkable=True
+        )
         chk_loop.setChecked(self.act_loop.isChecked())
         chk_loop.toggled.connect(self.act_loop.setChecked)
         self.act_loop.toggled.connect(chk_loop.setChecked)
@@ -785,14 +1046,16 @@ class Annotator(QtWidgets.QMainWindow):
         delay.setSingleStep(0.1)
         delay.setValue(self.loop_delay_sec)
         delay.setDecimals(2)
-        delay.setFixedWidth(70)
+        delay.setFixedWidth(64)
         delay.valueChanged.connect(self._set_loop_delay)
 
         # --- Delay presets dropdown (NEW, minimal) ---
-        btn_delay_menu = QtWidgets.QToolButton()
-        btn_delay_menu.setText("▾")
+        btn_delay_menu = self._ribbon_button(
+            self.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView),
+            "Delay presets"
+        )
         btn_delay_menu.setPopupMode(QToolButton.InstantPopup)
-        btn_delay_menu.setFixedWidth(22)
+        btn_delay_menu.setFixedSize(24, 22)
 
         delay_menu = QtWidgets.QMenu(btn_delay_menu)
         delay_menu.setStyleSheet("""
@@ -844,28 +1107,53 @@ class Annotator(QtWidgets.QMainWindow):
         delay_row = QtWidgets.QWidget()
         hl = QtWidgets.QHBoxLayout(delay_row)
         hl.setContentsMargins(0, 0, 0, 0)
-        hl.setSpacing(4)
+        hl.setSpacing(2)
         hl.addWidget(delay)
         hl.addWidget(btn_delay_menu)
 
-        nav.add(btn_prev)
-        nav.add(btn_next)
+        nav_row = QtWidgets.QWidget()
+        nav_row_layout = QtWidgets.QHBoxLayout(nav_row)
+        nav_row_layout.setContentsMargins(0, 0, 0, 0)
+        nav_row_layout.setSpacing(2)
+        nav_row_layout.addWidget(btn_prev)
+        nav_row_layout.addWidget(btn_next)
+        nav_row_layout.addWidget(chk_loop)
+
+        nav.add(nav_row)
         nav.add_row("Delay", delay_row)
-        nav.add(chk_loop)
 
         # ───────────────── Annotation ─────────────────
-        ann = RibbonGroup("Annotation", 210)
-
-        chk_ann = QtWidgets.QCheckBox("Annotation Mode")
-        chk_ann.setChecked(self.act_annotation_mode.isChecked())
-        chk_ann.toggled.connect(self.act_annotation_mode.setChecked)
-        self.act_annotation_mode.toggled.connect(chk_ann.setChecked)
-        ann.add(chk_ann)
+        ann = RibbonGroup("Annotation", 200)
 
         # --- Alpha ---
         s_alpha = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         s_alpha.setRange(0, 100)
         s_alpha.setValue(int(self.annotation_alpha * 100))
+        s_alpha.setStyleSheet("""
+            QSlider::groove:horizontal {
+                background: #d0d0d0;
+                height: 4px;
+                border-radius: 2px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #8a8a8a;
+                height: 4px;
+                border-radius: 2px;
+            }
+            QSlider::add-page:horizontal {
+                background: #d0d0d0;
+                height: 4px;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #000000;
+                border: 1px solid #000000;
+                width: 10px;
+                height: 10px;
+                margin: -4px 0;
+                border-radius: 5px;
+            }
+        """)
 
         lbl_alpha = QtWidgets.QLabel(f"{int(self.annotation_alpha * 100)}%")
         lbl_alpha.setFixedWidth(36)
@@ -878,6 +1166,7 @@ class Annotator(QtWidgets.QMainWindow):
         s_brush = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         s_brush.setRange(1, 200)
         s_brush.setValue(int(self.brush_size))
+        s_brush.setStyleSheet(s_alpha.styleSheet())
 
         lbl_brush = QtWidgets.QLabel(f"{int(self.brush_size)} px")
         lbl_brush.setFixedWidth(36)
@@ -890,6 +1179,7 @@ class Annotator(QtWidgets.QMainWindow):
         s_point = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         s_point.setRange(1, 20)
         s_point.setValue(self.point_size)
+        s_point.setStyleSheet(s_alpha.styleSheet())
 
         lbl_point = QtWidgets.QLabel(f"{self.point_size} px")
         lbl_point.setFixedWidth(36)
@@ -905,7 +1195,7 @@ class Annotator(QtWidgets.QMainWindow):
         }
 
         # ───────────────── Color ─────────────────
-        col = RibbonGroup("Color", 180)
+        col = RibbonGroup("Color", 170)
 
         btn_pick = QtWidgets.QPushButton("Pick Color…")
         btn_pick.clicked.connect(self.pick_color)
@@ -942,7 +1232,7 @@ class Annotator(QtWidgets.QMainWindow):
             b = QtWidgets.QPushButton()
             b.setCheckable(True)                         # ← KEY
             b.setAutoExclusive(False)                    # handled by group
-            b.setFixedSize(18, 18)
+            b.setFixedSize(15, 15)
             b.setStyleSheet(f"""
                 QPushButton {{
                     background: {c};
@@ -961,70 +1251,137 @@ class Annotator(QtWidgets.QMainWindow):
             g.addWidget(b, i // cols, i % cols)
 
         col.add(swatches)
+        color_height = col.sizeHint().height()
+        if color_height > 0:
+            ann.setFixedHeight(color_height)
 
         # ───────────────── Edit ─────────────────
-        edit = RibbonGroup("Edit", 100)
+        edit = RibbonGroup("Edit", 130)
 
-        chk_eraser = QtWidgets.QPushButton("Eraser")
-        chk_eraser.setCheckable(True)
+        chk_ann = self._ribbon_button(
+            self._icon_pencil(),
+            "Annotation mode (A)",
+            checkable=True
+        )
+        chk_ann.setChecked(self.act_annotation_mode.isChecked())
+        chk_ann.toggled.connect(self.act_annotation_mode.setChecked)
+        self.act_annotation_mode.toggled.connect(chk_ann.setChecked)
+
+        chk_eraser = self._ribbon_button(
+            self._icon_eraser(),
+            "Eraser",
+            checkable=True
+        )
         chk_eraser.setChecked(self.act_eraser.isChecked())
         chk_eraser.toggled.connect(self.act_eraser.setChecked)
         self.act_eraser.toggled.connect(chk_eraser.setChecked)
 
-        chk_repair = QtWidgets.QPushButton('Repair Mode')
-        chk_repair.setCheckable(True)   
+        chk_repair = self._ribbon_button(
+            self._icon_repair(),
+            "Repair",
+            checkable=True
+        )
         chk_repair.setChecked(self.act_repair.isChecked())
         chk_repair.toggled.connect(self.act_repair.setChecked)
         self.act_repair.toggled.connect(chk_repair.setChecked)
 
-        chk_clone = QtWidgets.QPushButton("Clone")
-        chk_clone.setCheckable(True)
+        chk_clone = self._ribbon_button(
+            self._icon_clone(),
+            "Clone",
+            checkable=True
+        )
         chk_clone.setChecked(self.act_clone.isChecked())
         chk_clone.toggled.connect(self.act_clone.setChecked)
         self.act_clone.toggled.connect(chk_clone.setChecked)
 
-        edit.add(chk_eraser)
-        edit.add(chk_repair)
-        edit.add(chk_clone)
+        edit_row = QtWidgets.QWidget()
+        edit_row_layout = QtWidgets.QHBoxLayout(edit_row)
+        edit_row_layout.setContentsMargins(0, 0, 0, 0)
+        edit_row_layout.setSpacing(2)
+        edit_row_layout.addWidget(chk_ann)
+        edit_row_layout.addWidget(chk_eraser)
+        edit_row_layout.addWidget(chk_repair)
+        edit_row_layout.addWidget(chk_clone)
+        edit.add(edit_row)
 
         # ───────────────── Enhancement ─────────────────
-        enh = RibbonGroup("Enhancement", 210)
+        enh = RibbonGroup("Enhancement", 195, title_position="bottom")
+        enh.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        enh.controls.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        enh.grid.setAlignment(QtCore.Qt.AlignTop)
+        if color_height > 0:
+            enh.setFixedHeight(color_height)
 
         s_gamma = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         s_gamma.setRange(10, 300)
         s_gamma.setValue(100)
         s_gamma.valueChanged.connect(self.on_gamma_change)
+        s_gamma.setStyleSheet(s_alpha.styleSheet())
 
         self.ribbon_gamma_slider = s_gamma
         self.ribbon_gamma_label = QtWidgets.QLabel("1.00")
         self.ribbon_gamma_label.setStyleSheet("font-size: 11px; color: #222;")
         self.ribbon_gamma_label.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight)
 
-        btn_auto = QtWidgets.QPushButton("Auto Contrast")
+        btn_auto = self._ribbon_button(
+            self._icon_contrast(),
+            "Auto contrast",
+            icon_size=16,
+            button_size=24
+        )
         btn_auto.clicked.connect(self.apply_auto_contrast)
 
-        btn_reset = QtWidgets.QPushButton("Reset")
+        btn_reset = self._ribbon_button(
+            self._icon_reset_contrast(),
+            "Reset contrast",
+            icon_size=16,
+            button_size=24
+        )
         btn_reset.clicked.connect(self.reset_contrast)
 
-        btn_hist = QtWidgets.QPushButton("Histograms")
+        btn_hist = self._ribbon_button(
+            self._icon_hist(),
+            "Show histograms",
+            icon_size=16,
+            button_size=24
+        )
         btn_hist.clicked.connect(self.show_histograms)
 
         enh.add_row("Gamma (G +/-)", s_gamma, self.ribbon_gamma_label)
         self.ribbon_sliders["gamma"] = (s_gamma, self.ribbon_gamma_label)
-        enh.add(btn_auto)
-        enh.add(btn_reset)
-        enh.add(btn_hist)
+        enh_row = QtWidgets.QWidget()
+        enh_row_layout = QtWidgets.QHBoxLayout(enh_row)
+        enh_row_layout.setContentsMargins(0, 0, 0, 0)
+        enh_row_layout.setSpacing(4)
+        enh_row_layout.addWidget(btn_auto)
+        enh_row_layout.addWidget(btn_reset)
+        enh_row_layout.addWidget(btn_hist)
+        enh.add(enh_row)
         
         # ───────────────── View ─────────────────
-        view = RibbonGroup("View", 140)
+        view = RibbonGroup("View", 195, title_position="bottom")
+        view.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+        view.controls.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+        view.grid.setAlignment(QtCore.Qt.AlignTop)
+        if color_height > 0:
+            view.setFixedHeight(color_height)
 
-        btn_reset = QtWidgets.QPushButton("Reset View")
+        btn_reset = self._ribbon_button(
+            self._icon_reset_view(),
+            "Reset view (R)"
+        )
         btn_reset.clicked.connect(self.reset_view)
 
-        btn_zoom_in = QtWidgets.QPushButton("Zoom In")
+        btn_zoom_in = self._ribbon_button(
+            self._icon_zoom(True),
+            "Zoom in"
+        )
         btn_zoom_in.clicked.connect(self.on_zoom_in)
 
-        btn_zoom_out = QtWidgets.QPushButton("Zoom Out")
+        btn_zoom_out = self._ribbon_button(
+            self._icon_zoom(False),
+            "Zoom out"
+        )
         btn_zoom_out.clicked.connect(self.on_zoom_out)
 
         # --- View preset dropdown ---
@@ -1048,12 +1405,19 @@ class Annotator(QtWidgets.QMainWindow):
             cmb_view.addItem(name, idx)
 
         cmb_view.setCurrentIndex(self.current_view)
-        cmb_view.currentIndexChanged.connect(
-            lambda i: self._set_view(cmb_view.itemData(i))
-        )
+        self.ribbon_view_combo = cmb_view
+        def _on_view_changed(i):
+            self._set_view(cmb_view.itemData(i))
+            self._release_view_combo_focus()
+
+        cmb_view.currentIndexChanged.connect(_on_view_changed)
 
         # --- Show Annotations ---
-        chk_toggle = QtWidgets.QCheckBox("Show Annotations")
+        chk_toggle = self._ribbon_button(
+            self._icon_eye(),
+            "Show annotations",
+            checkable=True
+        )
         chk_toggle.setChecked(self.act_toggle_annotations.isChecked())
         chk_toggle.toggled.connect(self.act_toggle_annotations.setChecked)
 
@@ -1061,18 +1425,47 @@ class Annotator(QtWidgets.QMainWindow):
         self.act_toggle_annotations.toggled.connect(chk_toggle.setChecked)
 
         # --- Assemble ---
-        view.add(btn_reset)
-        view.add(btn_zoom_in)
-        view.add(btn_zoom_out)
-        view.add_row("View", cmb_view)
-        view.add(chk_toggle)
+        view_row = QtWidgets.QWidget()
+        view_row_layout = QtWidgets.QHBoxLayout(view_row)
+        view_row_layout.setContentsMargins(0, 0, 0, 0)
+        view_row_layout.setSpacing(4)
+        view_row_layout.addWidget(btn_reset)
+        view_row_layout.addWidget(btn_zoom_in)
+        view_row_layout.addWidget(btn_zoom_out)
+        view_row_layout.addWidget(chk_toggle)
+
+        view.add(view_row)
+        spacer = QtWidgets.QWidget()
+        spacer.setFixedHeight(4)
+        view.add(spacer)
+        view.add(cmb_view)
 
         # ───────────────── Assemble ─────────────────
-        for grp in (nav, ann, col, edit, enh, view):
-            h.addWidget(grp)
+        nav_edit = QtWidgets.QWidget()
+        nav_edit_layout = QtWidgets.QVBoxLayout(nav_edit)
+        nav_edit_layout.setContentsMargins(0, 0, 0, 0)
+        nav_edit_layout.setSpacing(4)
+        nav_edit_layout.addWidget(nav)
+        nav_edit_layout.addWidget(edit)
+
+        h.addWidget(nav_edit, 0, QtCore.Qt.AlignTop)
+        for grp in (ann, col, enh, view):
+            h.addWidget(grp, 0, QtCore.Qt.AlignTop)
 
         h.addStretch(1)
         return ribbon
+
+    def _release_view_combo_focus(self):
+        """Drop combo focus so the blue highlight doesn't linger."""
+        def _focus():
+            try:
+                if hasattr(self, "plotter"):
+                    self.plotter.interactor.setFocus()
+                else:
+                    self.setFocus()
+            except Exception:
+                self.setFocus()
+        QtCore.QTimer.singleShot(0, _focus)
 
     def _build_nav_dock(self):
         """Patch 2B: Left navigation dock (empty shell)."""
@@ -1096,7 +1489,7 @@ class Annotator(QtWidgets.QMainWindow):
         container = QtWidgets.QWidget(self.nav_dock)
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(6)
+        layout.setSpacing(0)
 
         # Search / Go-to box
         self.nav_search = QtWidgets.QLineEdit()
@@ -1108,7 +1501,8 @@ class Annotator(QtWidgets.QMainWindow):
 
         # Feedback / status label
         self.nav_status = QtWidgets.QLabel("")
-        self.nav_status.setStyleSheet("color: gray; font-size: 11px;")
+        self.nav_status.setStyleSheet("color: gray; font-size: 10px; padding: 0px;")
+        self.nav_status.setMaximumHeight(4)
         layout.addWidget(self.nav_status)
 
         # PATCH 4: Navigation list (filenames only)
@@ -1215,6 +1609,15 @@ class Annotator(QtWidgets.QMainWindow):
     
     def _set_view(self, idx: int):
         self.current_view = idx
+        if hasattr(self, "ribbon_view_combo"):
+            combo = self.ribbon_view_combo
+            try:
+                combo.blockSignals(True)
+                pos = combo.findData(idx)
+                if pos >= 0:
+                    combo.setCurrentIndex(pos)
+            finally:
+                combo.blockSignals(False)
         self.apply_view(idx)        
 
     def open_ann_folder(self):
@@ -1313,14 +1716,17 @@ class Annotator(QtWidgets.QMainWindow):
             render_points_as_spheres=True
         )
 
-        # Set orientation ONCE; actual fit is deferred by _end_batch() → _finalize_layout()
-        self.apply_view()
-        if self.current_view == 0:
-            self.plotter_ref.view_xy()
-        elif self.current_view == 1:
-            self.plotter_ref.view_xy(-1)
+        # Pre-fit cameras (IMPORTANT: avoid double-fitting when camera is shared in split mode)
+        self._pre_fit_camera(self.cloud, self.plotter)
+
+        if self._shared_cam_active():
+            # both panes share ONE vtkCamera; do not pre-fit again using the other pane's aspect
+            self.plotter_ref.renderer.SetActiveCamera(self.plotter.renderer.GetActiveCamera())
+            self._shared_camera = self.plotter.renderer.GetActiveCamera()
+            self._need_split_fit = True   # ensure we fit ONCE after layout settles
         else:
-            self.plotter_ref.view_isometric()
+            self._pre_fit_camera(self.cloud_ref, self.plotter_ref)
+
 
         # send explicit (x,y) to on_click
         self.plotter.track_click_position(lambda pos: self.on_click(pos[0], pos[1]))
@@ -1348,7 +1754,7 @@ class Annotator(QtWidgets.QMainWindow):
             w1 = self.plotter.interactor.width()
             self.right_title.adjustSize()
             self.right_title.move((w1 - self.right_title.width()) // 2,
-                                    h1 - self.right_title.height() - 10)
+                                    h1 - self.right_title.height() - 2)
             self.right_title.raise_()
 
         # LEFT (original) label
@@ -1357,8 +1763,31 @@ class Annotator(QtWidgets.QMainWindow):
             w2 = self.plotter_ref.interactor.width()
             self.left_title.adjustSize()
             self.left_title.move((w2 - self.left_title.width()) // 2,
-                                h2 - self.left_title.height() - 10)
+                                h2 - self.left_title.height() - 2)
             self.left_title.raise_()
+
+    def _view_direction(self):
+        if self.current_view == 0:
+            return np.array([0.0, 0.0, -1.0])
+        if self.current_view == 1:
+            return np.array([0.0, 0.0, 1.0])
+        if self.current_view == 2:
+            return np.array([0.0, 1.0, 0.0])
+        if self.current_view == 3:
+            return np.array([0.0, -1.0, 0.0])
+        if self.current_view == 4:
+            return np.array([1.0, 0.0, 0.0])
+        if self.current_view == 5:
+            return np.array([-1.0, 0.0, 0.0])
+        if self.current_view == 6:
+            v = np.array([1.0, 1.0, -1.0])
+        elif self.current_view == 7:
+            v = np.array([-1.0, 1.0, -1.0])
+        elif self.current_view == 8:
+            v = np.array([1.0, -1.0, -1.0])
+        else:
+            v = np.array([-1.0, -1.0, -1.0])
+        return v / max(np.linalg.norm(v), 1e-6)
 
     def _fit_view(self, plotter):
         """Fit camera of a given plotter to its mesh bounds without changing orientation.
@@ -1378,7 +1807,6 @@ class Annotator(QtWidgets.QMainWindow):
         if mesh is None or mesh.n_points == 0:
             return
 
-        QtWidgets.QApplication.processEvents()
         xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
         cx, cy, cz = (xmin + xmax) / 2, (ymin + ymax) / 2, (zmin + zmax) / 2
         xr, yr, zr = (xmax - xmin), (ymax - ymin), (zmax - zmin)
@@ -1394,7 +1822,7 @@ class Annotator(QtWidgets.QMainWindow):
         # Keep current orientation (no re-view); compute distance/scale only
         dirp = np.array(cam.GetDirectionOfProjection(), dtype=float)
         if not np.isfinite(dirp).all() or np.linalg.norm(dirp) < 1e-6:
-            dirp = np.array([0, 0, -1]) if self.current_view == 0 else np.array([1, 1, -1])
+            dirp = self._view_direction()
         dirp /= np.linalg.norm(dirp)
 
         if cam.GetParallelProjection():
@@ -1422,18 +1850,152 @@ class Annotator(QtWidgets.QMainWindow):
             cam.SetPosition(*pos)
 
         plotter.reset_camera_clipping_range()
-        if not getattr(self, '_is_closing', False) and not getattr(self, '_batch', False):
+        if (not getattr(self, '_is_closing', False)
+                and not getattr(self, '_batch', False)
+                and not getattr(self, '_view_change_active', False)):
             plotter.render()
+
+    def _mesh_bounds_in_camera_xy(self, cam, mesh):
+        """
+        Return (half_w, half_h) of mesh bounds measured in CAMERA/view coordinates (x,y).
+        Robust for any view direction (top, iso, etc.).
+        """
+        # 8 corners of world AABB
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+        corners = np.array([
+            [xmin, ymin, zmin, 1.0],
+            [xmin, ymin, zmax, 1.0],
+            [xmin, ymax, zmin, 1.0],
+            [xmin, ymax, zmax, 1.0],
+            [xmax, ymin, zmin, 1.0],
+            [xmax, ymin, zmax, 1.0],
+            [xmax, ymax, zmin, 1.0],
+            [xmax, ymax, zmax, 1.0],
+        ], dtype=float)
+
+        # VTK view transform: world -> camera coords
+        M = cam.GetViewTransformMatrix()  # vtkMatrix4x4
+        mat = np.array([[M.GetElement(r, c) for c in range(4)] for r in range(4)], dtype=float)
+
+        cam_pts = (mat @ corners.T).T  # Nx4
+        x = cam_pts[:, 0]
+        y = cam_pts[:, 1]
+
+        half_w = 0.5 * float(x.max() - x.min())
+        half_h = 0.5 * float(y.max() - y.min())
+        return half_w, half_h
+
+
+    def _fit_shared_camera_once(self, mesh):
+        """
+        Fit the SHARED vtkCamera so that the object fits in BOTH panes.
+        This avoids the 'fit-left then fit-right' ping-pong that causes random scaling.
+        """
+        if mesh is None or mesh.n_points == 0:
+            return
+        if self._shared_camera is None:
+            return
+
+        cam = self._shared_camera
+
+        # center of bounds
+        xmin, xmax, ymin, ymax, zmin, zmax = mesh.bounds
+        cx, cy, cz = (xmin + xmax) / 2.0, (ymin + ymax) / 2.0, (zmin + zmax) / 2.0
+        center = np.array([cx, cy, cz], dtype=float)
+
+        # camera orientation
+        dop = np.array(cam.GetDirectionOfProjection(), dtype=float)
+        n = float(np.linalg.norm(dop))
+        if not np.isfinite(dop).all() or n < 1e-9:
+            dop = np.array([0.0, 0.0, -1.0], dtype=float)
+            n = 1.0
+        dop /= n
+
+        # measure object extents in camera X/Y (view coords)
+        half_w, half_h = self._mesh_bounds_in_camera_xy(cam, mesh)
+
+        # two viewports aspects (may differ slightly)
+        w1 = max(1, int(self.plotter.interactor.width()))
+        h1 = max(1, int(self.plotter.interactor.height()))
+        a1 = w1 / float(h1)
+
+        w2 = max(1, int(self.plotter_ref.interactor.width()))
+        h2 = max(1, int(self.plotter_ref.interactor.height()))
+        a2 = w2 / float(h2)
+
+        pad = float(getattr(self, "_fit_pad", 1.10))
+
+        cam.SetFocalPoint(cx, cy, cz)
+
+        if cam.GetParallelProjection():
+            # ParallelScale is half the visible height.
+            # Need scale big enough to fit width AND height for each aspect.
+            s1 = max(half_h, half_w / max(a1, 1e-6))
+            s2 = max(half_h, half_w / max(a2, 1e-6))
+            scale = max(s1, s2) * pad
+
+            pos = np.array(cam.GetPosition(), dtype=float)
+            if not np.isfinite(pos).all():
+                # pick a safe distance (doesn't affect size in parallel)
+                r = float(np.linalg.norm([xmax - xmin, ymax - ymin, zmax - zmin])) or 1.0
+                pos = center - dop * (r * 2.0 + 1.0)
+
+            cam.SetPosition(*pos)
+            cam.SetParallelScale(scale)
+
+        else:
+            vfov = np.deg2rad(float(cam.GetViewAngle()))
+            vfov = max(vfov, 1e-3)
+
+            def dist_needed(aspect):
+                hfov = 2.0 * np.arctan(np.tan(vfov / 2.0) * max(aspect, 1e-6))
+                hfov = max(hfov, 1e-3)
+                d_h = half_h / np.tan(vfov / 2.0)
+                d_w = half_w / np.tan(hfov / 2.0)
+                return max(d_h, d_w)
+
+            dist = max(dist_needed(a1), dist_needed(a2)) * pad
+            cam.SetPosition(*(center - dop * dist))
 
     def _fit_to_canvas(self):
         if getattr(self, '_is_closing', False) or getattr(self, '_batch', False):
             return
-        # Fit left (annotated)
+
+        split = self._is_split_mode()
+        shared = bool(split and self._shared_camera is not None)
+
+        if shared:
+            # IMPORTANT: fit ONCE (camera is shared)
+            mesh = getattr(self, "cloud", None)
+            if mesh is None or mesh.n_points == 0:
+                mesh = getattr(self, "cloud_ref", None)
+            if mesh is None:
+                return
+
+            self._fit_shared_camera_once(mesh)
+
+            try:
+                self.plotter.reset_camera_clipping_range()
+                self.plotter_ref.reset_camera_clipping_range()
+            except Exception:
+                pass
+
+            if getattr(self, '_view_change_active', False):
+                self._view_change_active = False
+                self._sync_renders()
+            else:
+                self._sync_renders()
+            return
+
+        # --- non-shared / single-pane behavior ---
         if hasattr(self, 'plotter'):
             self._fit_view(self.plotter)
-        # Fit right (original) when visible
         if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
-            self._fit_view(self.plotter_ref)            
+            self._fit_view(self.plotter_ref)
+        if getattr(self, '_view_change_active', False):
+            self._view_change_active = False
+            self._render_views_once()
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1449,6 +2011,15 @@ class Annotator(QtWidgets.QMainWindow):
         We set orientation explicitly for both panes, then defer the fit.
         """
         topdown = (self.current_view == 0)  # 0 = Top view
+        self._view_change_active = True
+        self._cam_pause = True
+        views = [getattr(self, 'plotter', None), getattr(self, 'plotter_ref', None)]
+        for view in views:
+            if view:
+                try:
+                    view.interactor.setUpdatesEnabled(False)
+                except Exception:
+                    pass
 
         def _apply(plotter, mesh, topdown: bool):
             if plotter is None or mesh is None or mesh.n_points == 0:
@@ -1521,16 +2092,24 @@ class Annotator(QtWidgets.QMainWindow):
 
             plotter.reset_camera_clipping_range()
 
-        # Left (annotated)
-        _apply(self.plotter, getattr(self, 'cloud', None), topdown)
+        try:
+            # Left (annotated)
+            _apply(self.plotter, getattr(self, 'cloud', None), topdown)
 
-        # Right (original)
-        if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
-            _apply(self.plotter_ref, getattr(self, 'cloud_ref', None), topdown)
+            # Right (original)
+            if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
+                _apply(self.plotter_ref, getattr(self, 'cloud_ref', None), topdown)
+        finally:
+            for view in views:
+                if view:
+                    try:
+                        view.interactor.setUpdatesEnabled(True)
+                    except Exception:
+                        pass
+            self._cam_pause = False
 
         # Defer the actual fit so it uses final widget sizes
         self._schedule_fit()
-
 
     def reset_view(self):
         self.plotter.reset_camera()
@@ -1593,7 +2172,7 @@ class Annotator(QtWidgets.QMainWindow):
         # update ribbon label
         if hasattr(self, "ribbon_sliders") and "brush" in self.ribbon_sliders:
             _, lbl = self.ribbon_sliders["brush"]
-            lbl.setText(f"{v}px")
+            lbl.setText(f"{v} px")
         if self.act_annotation_mode.isChecked():
             self.update_cursor()
 
@@ -2386,6 +2965,9 @@ class Annotator(QtWidgets.QMainWindow):
 
     def toggle_repair_mode(self, on: bool):
         
+        if on:
+            self._need_split_fit = True   # ← NEW
+
         if on and self.clone_mode:
             self.act_clone.setChecked(False)    # ← force exit Clone first
         
@@ -2431,8 +3013,10 @@ class Annotator(QtWidgets.QMainWindow):
         self._schedule_fit()
         self.update_annotation_visibility()
     
-    def toggle_clone_mode(self, on: bool):
-        self.clone_mode = bool(on)        
+    def toggle_clone_mode(self, on: bool):        
+        if on:
+            self._need_split_fit = True
+        self.clone_mode = bool(on)     
         
         if on and self.repair_mode:
             self.act_repair.setChecked(False)   # ← force exit Repair first
@@ -2492,11 +3076,6 @@ class Annotator(QtWidgets.QMainWindow):
             pass
 
         try:
-            self._thumb_pool.shutdown(wait=False)
-        except Exception:
-            pass
-        
-        try:
             self._loop_timer.stop()
             self.statusBar().clearMessage()   # PATCH 10
         except Exception:
@@ -2533,6 +3112,7 @@ class Annotator(QtWidgets.QMainWindow):
         finally:
             self._cam_syncing = False
 
+
     def _link_cameras(self):
         """Make both panels share the same vtkCamera and keep renders in sync."""
         if not hasattr(self, 'plotter') or not hasattr(self, 'plotter_ref'):
@@ -2564,18 +3144,16 @@ class Annotator(QtWidgets.QMainWindow):
             pass
         self._shared_camera = None        
         
-    def _begin_batch(self):                                # REPLACE with:
+    def _begin_batch(self):
         self._batch = True
-        self._cam_pause = True          # NEW: pause cam observer effects
-        # While rebuilding a file, unlink cameras so view changes don’t echo back
-        try:
-            if self.repair_mode or getattr(self, 'clone_mode', False):
-                self._unlink_cameras()  # NEW
-        except Exception:
-            pass
-        
-        self._cam_snap_l = self._snap_camera(self.plotter)         # NEW
-        self._cam_snap_r = self._snap_camera(self.plotter_ref) if self.plotter_ref.isVisible() else None  # NEW
+        self._cam_pause = True
+
+        # DO NOT unlink cameras here (causes camera instance churn + pumping)
+        self._cam_snap_l = self._snap_camera(self.plotter)
+        # In split/shared camera mode, snapping the "right" is redundant and can reintroduce mismatch
+        self._cam_snap_r = None if self._shared_cam_active() else (
+            self._snap_camera(self.plotter_ref) if self.plotter_ref.isVisible() else None
+        )
 
         for view in [getattr(self, 'plotter', None), getattr(self, 'plotter_ref', None)]:
             if view:
@@ -2585,27 +3163,51 @@ class Annotator(QtWidgets.QMainWindow):
         if getattr(self, '_is_closing', False):
             return
 
-        # Restore previous camera (prevents a blank/odd first frame)
+        # Block shared-camera observer renders while we settle
+        self._cam_pause = True
+
+        split = self._is_split_mode()
+
         try:
-            if hasattr(self, 'plotter'):
-                self.plotter.render()
-            if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
-                self.plotter_ref.render()
-        except Exception:
-            pass
+            # Restore previous camera pose (prevents visible zoom pumping)
+            if hasattr(self, "_cam_snap_l") and self._cam_snap_l:
+                self._restore_camera(self.plotter, self._cam_snap_l)
 
-        # NOW enforce the chosen view (this overrides any stale orientation)
-        self.apply_view()  # schedules the debounced fit internally
+            if split:
+                cam = self.plotter.renderer.GetActiveCamera()
+                self.plotter_ref.renderer.SetActiveCamera(cam)
+                self._shared_camera = cam
 
-        # Overlays once sizes have settled
-        self._position_overlays()
+                # Restore camera pose (IMPORTANT: in split mode camera is shared → restore ONCE)
+                if hasattr(self, "_cam_snap_l") and self._cam_snap_l:
+                    self._restore_camera(self.plotter, self._cam_snap_l)
+                    # plotter_ref shares the same camera; do NOT restore a second snapshot
 
-        # Quick render so the user sees something immediately
-        if not getattr(self, '_startup', False):
-            if hasattr(self, 'plotter'):
-                self.plotter.render()
-            if hasattr(self, 'plotter_ref') and self.plotter_ref.isVisible():
-                self.plotter_ref.render()
+
+                # ✅ ONE-TIME fit when entering split mode
+                if getattr(self, "_need_split_fit", False):
+                    self._fit_to_canvas()
+                    self._need_split_fit = False
+
+                self.plotter.reset_camera_clipping_range()
+                self.plotter_ref.reset_camera_clipping_range()
+
+            else:
+                # Normal single-pane behavior: keep your existing view + fit behavior
+                self.apply_view()
+                try:
+                    self._fit_to_canvas()
+                except Exception:
+                    pass
+
+            # overlays after layout settles
+            self._position_overlays()
+
+        finally:
+            self._cam_pause = False
+
+        # One final refresh only
+        self._sync_renders()
 
         # Clear snapshots
         self._cam_snap_l = None
@@ -2630,25 +3232,25 @@ class Annotator(QtWidgets.QMainWindow):
         aspect = w / float(h)
         pad = float(getattr(self, "_fit_pad", 1.12))
 
-        topdown = (self.current_view == 0)
+        is_parallel = self.current_view in (0, 1)
+        dop = self._view_direction()
+        dop /= max(np.linalg.norm(dop), 1e-6)
 
-        if topdown:
-            # Orthographic straight down
+        if is_parallel:
+            # Orthographic top/bottom
             cam.ParallelProjectionOn()
             cam.SetViewUp(0, 1, 0)
-            dop = np.array([0.0, 0.0, -1.0])
             # ParallelScale ≈ half visible height
             scale_h = 0.5 * yr
             scale_w = 0.5 * xr / max(aspect, 1e-6)
             cam.SetParallelScale(max(scale_h, scale_w) * pad)
-            pos = np.array([cx, cy, cz]) - dop * (r * 2.0 + 1.0)  # any positive distance
+            pos = np.array([cx, cy, cz]) - dop * (r * 2.0 + 1.0)
             cam.SetFocalPoint(cx, cy, cz)
             cam.SetPosition(*pos)
         else:
-            # South-West isometric (from -X,-Y,+Z)
+            # Perspective views
             cam.ParallelProjectionOff()
             cam.SetViewUp(0, 0, 1)
-            dop = np.array([1.0, 1.0, -1.0]); dop /= np.linalg.norm(dop)
             vfov = np.deg2rad(cam.GetViewAngle())
             hfov = 2.0 * np.arctan(np.tan(vfov / 2.0) * aspect)
             eff = max(1e-3, min(vfov, hfov))
@@ -2656,17 +3258,15 @@ class Annotator(QtWidgets.QMainWindow):
             cam.SetFocalPoint(cx, cy, cz)
             cam.SetPosition(*(np.array([cx, cy, cz]) - dop * dist))
 
-    def _end_batch(self):                                  # REPLACE with:
+    def _end_batch(self):
         for view in [getattr(self, 'plotter', None), getattr(self, 'plotter_ref', None)]:
             if view:
                 view.interactor.setUpdatesEnabled(True)
-        # Re-link cameras AFTER fit to avoid bounce
-        if self.repair_mode or getattr(self, 'clone_mode', False):
-            self._link_cameras()            # NEW
+
         self._batch = False
-        self._cam_pause = False             # NEW
-        # Defer fit+render until the splitter/widget sizes settle this event loop
-        QtCore.QTimer.singleShot(0, self._finalize_layout)  # NEW
+        self._cam_pause = False
+        QtCore.QTimer.singleShot(0, self._finalize_layout)
+
 
     def _schedule_fit(self, delay=None):
         """Coalesce multiple fit requests into one."""
@@ -2872,6 +3472,9 @@ class Annotator(QtWidgets.QMainWindow):
                 self.load_cloud()
                 self._position_overlays()
                 self._sync_nav_selection()
+                self._update_status_bar()
+                self._nav_release_pending = True
+                QtCore.QTimer.singleShot(0, self._reset_nav_search)
             else:
                 self.nav_status.setText("Index out of range")
             return
@@ -2932,6 +3535,9 @@ class Annotator(QtWidgets.QMainWindow):
             return
 
         self._nav_item_widgets = {}
+        with self._thumb_lock:
+            self._thumb_out_by_idx = {}
+            self._thumb_job_set.clear()
 
         self.nav_list.blockSignals(True)
         self.nav_list.clear()
@@ -3029,56 +3635,7 @@ class Annotator(QtWidgets.QMainWindow):
         Generate a thumbnail PNG for a point cloud.
         Runs in background thread. NO Qt calls allowed here.
         """
-        try:
-            pc = pv.read(str(path))
-            if hasattr(self, "orig_dir") and self.orig_dir is not None:
-                cand = self.orig_dir / path.name
-                if cand.exists():
-                    pc = pv.read(str(cand))
-
-            if pc.n_points == 0:
-                return
-
-            plotter = pv.Plotter(off_screen=True, window_size=(size, size))
-            plotter.set_background("white")
-
-            if "RGB" in pc.array_names:
-                plotter.add_points(pc, scalars="RGB", rgb=True, point_size=4)
-            else:
-                plotter.add_points(pc, color="gray", point_size=4)
-
-            # --- Top-down orthographic view (no zoom, no border) ---
-            cam = plotter.camera
-            cam.ParallelProjectionOn()
-            cam.SetViewUp(0, 1, 0)
-
-            # Compute bounds
-            xmin, xmax, ymin, ymax, zmin, zmax = pc.bounds
-            cx = 0.5 * (xmin + xmax)
-            cy = 0.5 * (ymin + ymax)
-            cz = 0.5 * (zmin + zmax)
-
-            # Look straight down +Z
-            cam.SetFocalPoint(cx, cy, cz)
-            cam.SetPosition(cx, cy, zmax + (zmax - zmin + 1e-3))
-
-            # Tight parallel scale (half-height of visible area)
-            xr = xmax - xmin
-            yr = ymax - ymin
-            cam.SetParallelScale(0.5 * max(xr, yr))
-
-            plotter.reset_camera_clipping_range()
-
-            img = plotter.screenshot(transparent_background=False)
-            plotter.close()
-
-            # Ensure uint8 RGB
-            img = img[:, :, :3].astype(np.uint8)
-            Image.fromarray(img).save(out_png)
-
-        except Exception:
-            # Silent failure (thumbnail is optional)
-            pass
+        _generate_thumbnail_job(path, out_png, size)
 
     def _request_thumbnail(self, idx: int):
         """
@@ -3103,15 +3660,42 @@ class Annotator(QtWidgets.QMainWindow):
             return
 
         with self._thumb_lock:
-            if idx in self._thumb_futures:
-                return
+            self._thumb_out_by_idx[idx] = out_png
+            self._thumb_job_set.add((src_path, out_png))
 
-            fut = self._thumb_pool.submit(
-                self._generate_thumbnail,
-                src_path,          # ← IMPORTANT
-                out_png
-            )
-            self._thumb_futures[idx] = fut
+        if not self._thumb_worker_running and not self._thumb_worker_start_pending:
+            self._thumb_worker_start_pending = True
+            QtCore.QTimer.singleShot(0, self._start_thumb_worker)
+
+    def _start_thumb_worker(self):
+        if getattr(self, "_thumb_worker_running", False):
+            return
+
+        self._thumb_worker_start_pending = False
+        self._thumb_worker_running = True
+
+        def worker():
+            try:
+                while True:
+                    with self._thumb_lock:
+                        jobs = list(self._thumb_job_set)
+                        self._thumb_job_set.clear()
+
+                    if not jobs:
+                        break
+
+                    Parallel(
+                        n_jobs=THUMB_N_JOBS,
+                        backend=THUMB_BACKEND,
+                        verbose=0
+                    )(
+                        delayed(_generate_thumbnail_job)(src, out, THUMB_SIZE)
+                        for src, out in jobs
+                    )
+            finally:
+                self._thumb_worker_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _thumb_icon_for_index(self, idx: int):
         """
@@ -3136,8 +3720,6 @@ class Annotator(QtWidgets.QMainWindow):
             return None
 
     def _refresh_nav_thumbnail(self, idx: int):
-        if not hasattr(self, "_nav_thumb_labels"):
-            return
         entry = self._nav_item_widgets.get(idx)
         if entry is None:
             return
@@ -3154,18 +3736,25 @@ class Annotator(QtWidgets.QMainWindow):
         lbl.setPixmap(pix)
 
     def _poll_thumbnails(self):
-        """Check completed thumbnail futures and refresh UI icons."""
-        done = []
+        """Refresh UI icons when thumbnail files appear on disk."""
         with self._thumb_lock:
-            for idx, fut in list(self._thumb_futures.items()):
-                if fut.done():
-                    done.append(idx)
+            pending = list(self._thumb_out_by_idx.items())
 
-            for idx in done:
-                self._thumb_futures.pop(idx, None)
+        updated = []
+        for idx, out_png in pending[:60]:
+            if out_png.exists():
+                updated.append(idx)
 
-        for idx in done:
-            self._refresh_nav_thumbnail(idx)
+        if updated:
+            with self._thumb_lock:
+                for idx in updated:
+                    self._thumb_out_by_idx.pop(idx, None)
+
+            for idx in updated:
+                self._refresh_nav_thumbnail(idx)
+
+            if hasattr(self, "nav_list"):
+                self.nav_list.viewport().update()
             
         self._update_status_bar()
 
@@ -3386,7 +3975,10 @@ class Annotator(QtWidgets.QMainWindow):
         elif is_annot:
             self.sb_anno.setText("Annotated")
         else:
-            self.sb_anno.setText("Clean")
+            if len(getattr(self, "_thumb_out_by_idx", {})) > 0:
+                self.sb_anno.setText("Processing Thumbnails…")
+            else:
+                self.sb_anno.setText("Clean")
 
         # Loop state (Patch 10)
         if self.act_loop.isChecked():
@@ -3396,7 +3988,7 @@ class Annotator(QtWidgets.QMainWindow):
 
         # Thumbnail progress (optional but useful)
         total = len(self.files) if self.files else 0
-        pending = len(getattr(self, "_thumb_futures", {}))
+        pending = len(getattr(self, "_thumb_out_by_idx", {}))
         done = max(0, total - pending)
         if total > 0:
             self.sb_thumb.setText(f"Thumbs: {done}/{total}")
@@ -3436,12 +4028,12 @@ class Annotator(QtWidgets.QMainWindow):
     def _on_ribbon_brush(self, v: int):
         # update value label, then call your existing method
         _, lbl = self.ribbon_sliders["brush"]
-        lbl.setText(f"{int(v)}px")
+        lbl.setText(f"{int(v)} px")
         self.change_brush(v)
 
     def _on_ribbon_point(self, v: int):
         _, lbl = self.ribbon_sliders["point"]
-        lbl.setText(f"{int(v)}px")
+        lbl.setText(f"{int(v)} px")
         self.change_point(v)
 
     def _on_ribbon_gamma(self, v: int):
@@ -3463,6 +4055,12 @@ class Annotator(QtWidgets.QMainWindow):
             self._toggle_loop(True)
 
         self._update_status_bar()
+
+    def _is_split_mode(self) -> bool:
+        return bool(self.repair_mode or self.clone_mode) and hasattr(self, "plotter_ref") and self.plotter_ref.isVisible()
+
+    def _shared_cam_active(self) -> bool:
+        return bool(self._is_split_mode() and self._shared_camera is not None)
 
     def show_about_dialog(self):
         QtWidgets.QMessageBox.about(

@@ -1,3 +1,5 @@
 # Ignore Python application files
-app1.py
-app2.py
+python/Archive/*
+python/__pycache__/
+python/*.pyc
+python/*.pyo
