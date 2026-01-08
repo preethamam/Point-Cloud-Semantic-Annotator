@@ -14,6 +14,7 @@ THUMB_SIZE = 96   # pixels (safe, fast, clean)
 THUMB_MAX_PTS = 150_000   # cap for thumb generation (fast)
 PERCENTAGE_CORE_FACTOR = 0.80
 THUMB_BACKEND = "threading"
+DEBUG_GUI_LOG = True
 
 NAV_THUMB_SIZE = THUMB_SIZE
 NAV_NAME_MAX = 30

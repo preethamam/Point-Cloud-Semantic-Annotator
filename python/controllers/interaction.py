@@ -105,6 +105,8 @@ def event_filter(app, obj, event):
 
     if obj is getattr(app, "plotter", None) or obj is getattr(app, "plotter_ref", None):
         if event.type() == QtCore.QEvent.MouseButtonPress and event.button() == QtCore.Qt.LeftButton:
+            if not hasattr(app, "colors"):
+                return False
             if not app.act_annotation_mode.isChecked():
                 return False
             if app.clone_mode and obj is not app.plotter_ref:
@@ -123,6 +125,8 @@ def event_filter(app, obj, event):
             return True
 
         if event.type() == QtCore.QEvent.MouseMove:
+            if not hasattr(app, "colors"):
+                return False
             if not app.act_annotation_mode.isChecked():
                 return False
             if app.clone_mode and obj is not app.plotter_ref:

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from PyQt5 import QtCore, QtWidgets
+from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QToolButton
 
 
@@ -280,11 +283,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
         "point": (s_point, lbl_point),
     }
 
-    col = RibbonGroup("Color", 170)
-
-    btn_pick = QtWidgets.QPushButton("Pick Color.")
-    btn_pick.clicked.connect(app.pick_color)
-    col.add(btn_pick)
+    col = RibbonGroup("Colors", 170)
 
     swatches = QtWidgets.QWidget()
     g = QtWidgets.QGridLayout(swatches)
@@ -299,6 +298,8 @@ def build_ribbon(app) -> QtWidgets.QWidget:
         "#008080", "#000080", "#808000", "#FFC0CB",
         "#C0C0C0", "#FFD700", "#4B0082", "#2E8B57",
         "#DC143C", "#4682B4", "#9ACD32", "#8B4513",
+        "#7FFF00", "#00CED1", "#FF1493", "#708090", 
+        "#FFDAB9",
     ]
 
     cols = 6
@@ -308,7 +309,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
         b = QtWidgets.QPushButton()
         b.setCheckable(True)
         b.setAutoExclusive(False)
-        b.setFixedSize(15, 15)
+        b.setFixedSize(16, 16)
         b.setStyleSheet(f"""
             QPushButton {{
                 background: {c};
@@ -320,17 +321,32 @@ def build_ribbon(app) -> QtWidgets.QWidget:
                 padding: -1px;
                 background: {c};
             }}
+            QPushButton:hover {{
+                border-color: #00E5FF;
+            }}
         """)
-
         swatch_group.addButton(b)
         b.clicked.connect(lambda _, x=c: app.select_swatch(x))
         g.addWidget(b, i // cols, i % cols)
 
-    col.add(swatches)
-    color_height = col.sizeHint().height()
-    if color_height > 0:
-        ann.setFixedHeight(color_height)
+    pick_btn = QtWidgets.QPushButton()
+    pick_btn.setFixedSize(16,16)
+    pick_btn.setToolTip("Pick color")
+    pick_btn.setFlat(True)
+    pick_btn.setAutoFillBackground(False)
+    pick_btn.setStyleSheet("""
+        QPushButton { border: 1px solid transparent; border-radius: 2px; }
+        QPushButton:hover { border-color: #777; }
+        QPushButton:pressed { border-color: #00E5FF; }
+    """)
+    icon_path = Path(__file__).resolve().parent.parent / "icons" / "color-pick.png"
+    if icon_path.exists():
+        pick_btn.setIcon(QIcon(str(icon_path)))
+        pick_btn.setIconSize(QtCore.QSize(16, 16))
+    pick_btn.clicked.connect(app.pick_color)
+    g.addWidget(pick_btn, len(colors) // cols, cols - 1)
 
+    col.add(swatches)
     edit = RibbonGroup("Edit", 130)
 
     chk_ann = _ribbon_button(app._icon_pencil(), "Annotation mode (A)", checkable=True)
@@ -367,8 +383,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     enh.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
     enh.controls.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
     enh.grid.setAlignment(QtCore.Qt.AlignTop)
-    if color_height > 0:
-        enh.setFixedHeight(color_height)
+    # Height alignment is handled after layout is assembled.
 
     s_gamma = QtWidgets.QSlider(QtCore.Qt.Horizontal)
     s_gamma.setRange(10, 300)
@@ -405,8 +420,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     view.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
     view.controls.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
     view.grid.setAlignment(QtCore.Qt.AlignTop)
-    if color_height > 0:
-        view.setFixedHeight(color_height)
+    # Height alignment is handled after layout is assembled.
 
     btn_reset = _ribbon_button(app._icon_reset_view(), "Reset view (R)")
     btn_reset.clicked.connect(app.reset_view)
@@ -476,6 +490,23 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     h.addWidget(nav_edit, 0, QtCore.Qt.AlignTop)
     for grp in (ann, col, enh, view):
         h.addWidget(grp, 0, QtCore.Qt.AlignTop)
+
+    nav_edit.adjustSize()
+    target_height = max(
+        nav_edit.sizeHint().height(),
+        ann.sizeHint().height(),
+        col.sizeHint().height(),
+        enh.sizeHint().height(),
+        view.sizeHint().height(),
+    )
+    if target_height > 0:
+        nav_height = nav.sizeHint().height()
+        spacing = nav_edit_layout.spacing()
+        edit_height = max(0, target_height - nav_height - spacing)
+        edit.setFixedHeight(edit_height)
+        nav_edit.setFixedHeight(target_height)
+        for grp in (ann, col, enh, view):
+            grp.setFixedHeight(target_height)
 
     h.addStretch(1)
     return ribbon

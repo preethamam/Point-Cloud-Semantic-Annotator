@@ -19,6 +19,7 @@ from configs.constants import (
     THUMB_MAX_PTS,
     THUMB_SIZE,
 )
+from services.storage import log_gui
 
 THUMB_DIR.mkdir(parents=True, exist_ok=True)
 thumb_n_jobs = max(1, int((os.cpu_count() or 1) * PERCENTAGE_CORE_FACTOR))
@@ -30,6 +31,10 @@ def generate_thumbnail_job(path: Path, out_png: Path, size: int = THUMB_SIZE) ->
     Runs in background worker. No Qt calls allowed here.
     """
     try:
+        if out_png.exists():
+            return
+        log_gui(f"thumb_generate: src={path} out={out_png}")
+
         pc = pv.read(str(path))
         if pc.n_points == 0:
             return
@@ -69,6 +74,7 @@ def generate_thumbnail_job(path: Path, out_png: Path, size: int = THUMB_SIZE) ->
 
         img = img[:, :, :3].astype(np.uint8)
         Image.fromarray(img).save(out_png)
+        log_gui(f"thumb_generate_done: out={out_png} ok={out_png.exists()}")
 
     except Exception:
         pass
@@ -83,14 +89,60 @@ class ThumbnailService:
         self._thumb_out_by_idx = {}        # idx -> out_png
         self._thumb_worker_running = False
         self._thumb_worker_start_pending = False
+        self._thumb_generation = 0
+        self._thumb_batch_size = 12
 
     def reset_queue(self) -> None:
         with self._thumb_lock:
             self._thumb_out_by_idx = {}
             self._thumb_job_set.clear()
 
+    def new_generation(self) -> None:
+        """Cancel current thumbnail batch and start a new generation."""
+        with self._thumb_lock:
+            self._thumb_generation += 1
+            self._thumb_out_by_idx = {}
+            self._thumb_job_set.clear()
+            self._thumb_worker_running = False
+            self._thumb_worker_start_pending = False
+        log_gui(f"thumb_new_generation: gen={self._thumb_generation}")
+
+    def prune_ann_thumbs(self) -> None:
+        """
+        Remove annotation-based thumbnails when originals exist for the same files.
+        Keeps cache stable when switching original folders.
+        """
+        if self.app.orig_dir is None or not self.app.files:
+            return
+        removed = 0
+        for ann_path in self.app.files:
+            orig = self.app.orig_dir / ann_path.name
+            if not orig.exists():
+                continue
+            ann_key = self._thumb_key_for_path(ann_path)
+            orig_key = self._thumb_key_for_path(orig)
+            if ann_key == orig_key:
+                continue
+            ann_png = THUMB_DIR / f"{ann_key}.png"
+            if ann_png.exists():
+                try:
+                    ann_png.unlink()
+                    removed += 1
+                except Exception:
+                    pass
+        if removed:
+            log_gui(f"thumb_prune_ann: removed={removed}")
+
     def pending_count(self) -> int:
         return len(self._thumb_out_by_idx)
+
+    def _thumb_key_for_path(self, src: Path) -> str:
+        st = src.stat()
+        h = hashlib.sha1()
+        h.update(str(src.resolve()).encode("utf-8"))
+        h.update(str(st.st_size).encode("utf-8"))
+        h.update(str(int(st.st_mtime)).encode("utf-8"))
+        return h.hexdigest()
 
     def thumb_key(self, ann_path: Path) -> str:
         """
@@ -103,17 +155,15 @@ class ThumbnailService:
             src = orig if orig.exists() else ann_path
         else:
             src = ann_path
-
-        st = src.stat()
-
-        h = hashlib.sha1()
-        h.update(str(src.resolve()).encode("utf-8"))
-        h.update(str(st.st_size).encode("utf-8"))
-        h.update(str(int(st.st_mtime)).encode("utf-8"))
-        return h.hexdigest()
+        return self._thumb_key_for_path(src)
 
     def thumb_path(self, path: Path) -> Path:
-        return THUMB_DIR / f"{self.thumb_key(path)}.png"
+        if self.app.orig_dir is not None:
+            orig = self.app.orig_dir / path.name
+            if orig.exists():
+                return THUMB_DIR / f"{self._thumb_key_for_path(orig)}.png"
+            return THUMB_DIR / f"{self._thumb_key_for_path(path)}.png"
+        return THUMB_DIR / f"{self._thumb_key_for_path(path)}.png"
 
     def thumb_exists(self, path: Path) -> bool:
         return self.thumb_path(path).exists()
@@ -130,17 +180,22 @@ class ThumbnailService:
 
         if self.app.orig_dir is not None:
             orig_path = self.app.orig_dir / ann_path.name
-            src_path = orig_path if orig_path.exists() else ann_path
+            if not orig_path.exists():
+                return
+            src_path = orig_path
         else:
             src_path = ann_path
 
         out_png = self.thumb_path(ann_path)
         if out_png.exists():
+            log_gui(f"thumb_cache_hit: idx={idx} out={out_png}")
             return
 
         with self._thumb_lock:
             self._thumb_out_by_idx[idx] = out_png
             self._thumb_job_set.add((src_path, out_png))
+
+        log_gui(f"thumb_queued: idx={idx} src={src_path} out={out_png}")
 
         if not self._thumb_worker_running and not self._thumb_worker_start_pending:
             self._thumb_worker_start_pending = True
@@ -152,27 +207,37 @@ class ThumbnailService:
 
         self._thumb_worker_start_pending = False
         self._thumb_worker_running = True
+        gen = self._thumb_generation
+        log_gui(f"thumb_worker_start: gen={gen}")
 
         def worker():
             try:
                 while True:
                     with self._thumb_lock:
+                        if gen != self._thumb_generation:
+                            break
                         jobs = list(self._thumb_job_set)
                         self._thumb_job_set.clear()
 
                     if not jobs:
                         break
 
-                    Parallel(
-                        n_jobs=thumb_n_jobs,
-                        backend=THUMB_BACKEND,
-                        verbose=0
-                    )(
-                        delayed(generate_thumbnail_job)(src, out, THUMB_SIZE)
-                        for src, out in jobs
-                    )
+                    while jobs:
+                        if gen != self._thumb_generation:
+                            return
+                        batch = jobs[:self._thumb_batch_size]
+                        jobs = jobs[self._thumb_batch_size:]
+                        Parallel(
+                            n_jobs=thumb_n_jobs,
+                            backend=THUMB_BACKEND,
+                            verbose=0
+                        )(
+                            delayed(generate_thumbnail_job)(src, out, THUMB_SIZE)
+                            for src, out in batch
+                        )
             finally:
                 self._thumb_worker_running = False
+                log_gui(f"thumb_worker_end: gen={gen}")
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -183,6 +248,10 @@ class ThumbnailService:
         """
         try:
             path = self.app.files[idx]
+            if self.app.orig_dir is not None:
+                orig = self.app.orig_dir / path.name
+                if not orig.exists():
+                    return None
             png = self.thumb_path(path)
             if not png.exists():
                 return None

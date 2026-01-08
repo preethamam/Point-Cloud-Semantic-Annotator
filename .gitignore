@@ -3,3 +3,6 @@ Archive/*
 __pycache__/
 *.pyc
 *.pyo
+
+*.txt
+*.log

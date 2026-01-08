@@ -7,7 +7,7 @@ from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QShortcut
 
 from configs.constants import NAV_NAME_MAX, NAV_THUMB_SIZE
-from services.storage import load_state
+from services.storage import load_state, log_gui, save_state
 from services.thumbnail import ThumbnailService
 
 
@@ -92,6 +92,8 @@ def init_state(app) -> None:
     app._stroke_active = False
     app._stroke_idxs = set()
     app._colors_before_stroke = None
+    app._expecting_ann = False
+    app._pending_orig_dir = None
 
 
 def init_timers(app) -> None:
@@ -220,15 +222,38 @@ def restore_state(app) -> None:
         st = load_state()
         ann = st.get("annotation_dir", "")
         org = st.get("original_dir", "")
+        pairs = st.get("project_pairs", {})
         app.ann_dir = Path(ann) if ann else None
-        app.orig_dir = Path(org) if org else None
+        app.orig_dir = None
         app.index = max(0, st.get("index", 0))
         if app.ann_dir:
+            ann_key = str(app.ann_dir)
+            if not isinstance(pairs, dict):
+                pairs = {}
+            if ann_key not in pairs and org:
+                pairs[ann_key] = org
+                save_state({"project_pairs": pairs})
+            cand = pairs.get(ann_key, "")
+            app.orig_dir = Path(cand) if cand else None
             app.directory = app.ann_dir
             app.files = app._get_sorted_files()
+            if app.orig_dir is not None:
+                has_full_match = all((app.orig_dir / p.name).exists() for p in app.files)
+                if not has_full_match:
+                    log_gui(f"restore_state: orig_dir cleared (mismatch) orig_dir={app.orig_dir}")
+                    app.orig_dir = None
             app._populate_nav_list()
         else:
             app.directory, app.files = None, []
+        if app.orig_dir is not None and app.ann_dir is None:
+            app._expecting_ann = True
+        else:
+            app._expecting_ann = False
+        if hasattr(app, "act_open_orig"):
+            app.act_open_orig.setEnabled(not app._expecting_ann)
+        if hasattr(app, "act_open_ann"):
+            app.act_open_ann.setEnabled(app._expecting_ann)
+        log_gui(f"restore_state: ann_dir={app.ann_dir} orig_dir={app.orig_dir} files={len(app.files)}")
     except Exception:
         pass
 

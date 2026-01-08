@@ -9,11 +9,11 @@ def build_menubar(app) -> None:
 
     file_menu = menubar.addMenu("&File")
 
-    app.act_open_orig = QtWidgets.QAction("Open Original Folder.", app)
+    app.act_open_orig = QtWidgets.QAction("Open Original Folder", app)
     app.act_open_orig.triggered.connect(app.open_orig_folder)
     file_menu.addAction(app.act_open_orig)
 
-    app.act_open_ann = QtWidgets.QAction("Open Annotation Folder.", app)
+    app.act_open_ann = QtWidgets.QAction("Open Annotation Folder", app)
     app.act_open_ann.triggered.connect(app.open_ann_folder)
     file_menu.addAction(app.act_open_ann)
 
