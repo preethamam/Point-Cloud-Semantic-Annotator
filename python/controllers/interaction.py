@@ -178,7 +178,7 @@ def event_filter(app, obj, event):
                     app._session_edited[idxs] = True
                     app._mark_dirty_once()
                     if hasattr(app, "toggle_ann_chk"):
-                        app.toggle_ann_chk.setEnabled(bool(np.any(app._session_edited)))
+                        app.toggle_ann_chk.setEnabled(True)
                     app._blend_into_mesh_subset(idxs)
 
                 app._line_len_px = t1 * dist
@@ -216,7 +216,7 @@ def event_filter(app, obj, event):
                     app._session_edited[idxs] = True
                     app._mark_dirty_once()
                     if hasattr(app, "toggle_ann_chk"):
-                        app.toggle_ann_chk.setEnabled(bool(np.any(app._session_edited)))
+                        app.toggle_ann_chk.setEnabled(True)
                     app._blend_into_mesh_subset(idxs)
 
             app._last_paint_xy = (x, y)

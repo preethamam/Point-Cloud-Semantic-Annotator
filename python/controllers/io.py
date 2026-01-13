@@ -233,7 +233,7 @@ def load_cloud(app) -> None:
 
     app._session_edited = np.zeros(app.cloud.n_points, dtype=bool)
     has_any_edit_now = np.any(app.colors != app.original_colors)
-    app.act_toggle_annotations.setEnabled(bool(has_any_edit_now))
+    app.act_toggle_annotations.setEnabled(True)
 
     app.annotations_visible = getattr(app, "act_toggle_annotations", None) is None or app.act_toggle_annotations.isChecked()
     app.update_annotation_visibility()
@@ -277,7 +277,7 @@ def on_save(app, _autosave: bool = False) -> None:
     try:
         app._session_edited = np.zeros(app.cloud.n_points, dtype=bool)
         if hasattr(app, "toggle_ann_chk"):
-            app.toggle_ann_chk.setEnabled(bool(np.any(app._session_edited)))
+            app.toggle_ann_chk.setEnabled(True)
     except Exception:
         pass
 

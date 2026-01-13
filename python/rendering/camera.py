@@ -259,6 +259,14 @@ def fit_to_canvas(app):
 
 def resize_event(app, event):
     super(type(app), app).resizeEvent(event)
+    if hasattr(app, "nav_dock") and app.nav_dock.isVisible():
+        if not app.isMinimized() and app.nav_dock.width() < app.nav_dock.minimumWidth():
+            target = int(getattr(app, "_nav_last_width", app.nav_dock.minimumWidth()))
+            app.resizeDocks([app.nav_dock], [target], QtCore.Qt.Horizontal)
+        else:
+            w = app.nav_dock.width()
+            if w >= app.nav_dock.minimumWidth():
+                app._nav_last_width = w
     if hasattr(app, "right_title"):
         app._position_overlays()
     if not getattr(app, "_batch", False):

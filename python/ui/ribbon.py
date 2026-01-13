@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtWidgets, QtGui
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QToolButton
 
@@ -69,7 +69,9 @@ class RibbonGroup(QtWidgets.QFrame):
     def add_row(self, label: str, w, trailing=None):
         """Label on left, control on right, optional trailing widget."""
         lbl = QtWidgets.QLabel(label)
-        lbl.setStyleSheet("font-size: 11px; color: #222;")
+        lbl.setStyleSheet(
+            "font-size: 11px; color: #222; background: transparent; border: none; padding: 0px;"
+        )
         lbl.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
 
         self.grid.addWidget(lbl, self._row, 0)
@@ -136,13 +138,28 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     chk_loop.toggled.connect(app.act_loop.setChecked)
     app.act_loop.toggled.connect(chk_loop.setChecked)
 
-    delay = QtWidgets.QDoubleSpinBox()
-    delay.setRange(0.1, 60.0)
-    delay.setSingleStep(0.1)
-    delay.setValue(app.loop_delay_sec)
-    delay.setDecimals(2)
+    delay = QtWidgets.QLineEdit()
+    delay.setText(f"{app.loop_delay_sec:.2f}")
     delay.setFixedWidth(64)
-    delay.valueChanged.connect(app._set_loop_delay)
+    delay.setAlignment(QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter)
+    delay_validator = QtGui.QDoubleValidator(0.1, 60.0, 2, delay)
+    delay_validator.setNotation(QtGui.QDoubleValidator.StandardNotation)
+    delay.setValidator(delay_validator)
+
+    def _commit_delay():
+        text = delay.text().strip()
+        try:
+            val = float(text)
+        except ValueError:
+            delay.setText(f"{app.loop_delay_sec:.2f}")
+            delay.clearFocus()
+            return
+        val = max(0.1, min(60.0, val))
+        app._set_loop_delay(val)
+        delay.setText(f"{val:.2f}")
+        delay.clearFocus()
+
+    delay.editingFinished.connect(_commit_delay)
 
     btn_delay_menu = _ribbon_button(
         app.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView),
@@ -169,7 +186,10 @@ def build_ribbon(app) -> QtWidgets.QWidget:
         """)
 
     def _set_delay(val):
-        delay.setValue(float(val))
+        val = float(val)
+        app._set_loop_delay(val)
+        delay.setText(f"{val:.2f}")
+        delay.clearFocus()
 
     for v in (0.1, 0.5, 1.0, 2.0, 5.0, 10.0):
         act = QtWidgets.QAction(f"{v:.1f} s", app)
@@ -213,7 +233,21 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     nav_row_layout.addWidget(chk_loop)
 
     nav.add(nav_row)
-    nav.add_row("Delay", delay_row)
+    delay_container = QtWidgets.QWidget()
+    delay_layout = QtWidgets.QHBoxLayout(delay_container)
+    delay_layout.setContentsMargins(0, 0, 0, 0)
+    delay_layout.setSpacing(2)
+
+    delay_lbl = QtWidgets.QLabel("Delay:")
+    delay_lbl.setStyleSheet(
+        "font-size: 11px; color: #222; background: transparent; border: none; padding: 0px;"
+    )
+    delay_lbl.setAlignment(QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft)
+
+    delay_layout.addWidget(delay_lbl)
+    delay_layout.addWidget(delay_row)
+
+    nav.add(delay_container)
 
     ann = RibbonGroup("Annotation", 200)
 

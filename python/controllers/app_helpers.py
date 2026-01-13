@@ -18,6 +18,37 @@ def release_view_combo_focus(app) -> None:
     QtCore.QTimer.singleShot(0, _focus)
 
 
+def on_nav_visibility_changed(app, visible: bool) -> None:
+    if app.isMinimized():
+        return
+    if hasattr(app, "act_toggle_nav"):
+        app.act_toggle_nav.setChecked(bool(visible))
+    app._schedule_fit()
+
+
+def on_change_event(app, event) -> None:
+    if event.type() != QtCore.QEvent.WindowStateChange:
+        return
+
+    if app.isMinimized():
+        if hasattr(app, "nav_dock"):
+            app._nav_was_visible = app.nav_dock.isVisible()
+        return
+
+    want_visible = bool(getattr(app, "_nav_was_visible", True))
+    if not hasattr(app, "nav_dock"):
+        return
+
+    if want_visible:
+        app.nav_dock.setVisible(True)
+        if hasattr(app, "act_toggle_nav"):
+            app.act_toggle_nav.setChecked(True)
+        target = int(getattr(app, "_nav_last_width", app.nav_dock.minimumWidth()))
+        app.resizeDocks([app.nav_dock], [target], QtCore.Qt.Horizontal)
+    else:
+        if hasattr(app, "act_toggle_nav"):
+            app.act_toggle_nav.setChecked(False)
+
 def clone_source(app):
     """Color source for Clone mode."""
     return app.original_colors

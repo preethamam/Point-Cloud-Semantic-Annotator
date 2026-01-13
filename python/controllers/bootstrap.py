@@ -6,7 +6,7 @@ from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QShortcut
 
-from configs.constants import NAV_NAME_MAX, NAV_THUMB_SIZE
+from configs.constants import NAV_DOCK_WIDTH, NAV_NAME_MAX, NAV_THUMB_SIZE
 from services.storage import load_state, log_gui, save_state
 from services.thumbnail import ThumbnailService
 
@@ -94,6 +94,8 @@ def init_state(app) -> None:
     app._colors_before_stroke = None
     app._expecting_ann = False
     app._pending_orig_dir = None
+    app._nav_last_width = NAV_DOCK_WIDTH
+    app._nav_was_visible = True
 
 
 def init_timers(app) -> None:

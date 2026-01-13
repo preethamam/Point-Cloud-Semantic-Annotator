@@ -155,7 +155,8 @@ def build_menubar(app) -> None:
     act_toggle_nav.setChecked(True)
     act_toggle_nav.setShortcut(QKeySequence("N"))
     act_toggle_nav.toggled.connect(app.nav_dock.setVisible)
-    app.nav_dock.visibilityChanged.connect(act_toggle_nav.setChecked)
+    app.act_toggle_nav = act_toggle_nav
+    app.nav_dock.visibilityChanged.connect(app._on_nav_visibility_changed)
     view_menu.addAction(act_toggle_nav)
 
     playback_menu = menubar.addMenu("&Playback")

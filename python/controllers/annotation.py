@@ -446,15 +446,20 @@ def update_annotation_visibility(app) -> None:
 
 
 def toggle_repair_mode(app, on: bool) -> None:
-    if on:
+    was_split = bool(
+        app.repair_mode or app.clone_mode or app.act_repair.isChecked() or app.act_clone.isChecked()
+    )
+    if on and not was_split:
         app._need_split_fit = True
 
     if on and app.clone_mode:
         app.act_clone.setChecked(False)
 
     app.repair_mode = bool(on)
-    app.plotter_ref.setVisible(app.repair_mode)
-    app.vline.setVisible(app.repair_mode)
+    pending_split = bool(app.act_repair.isChecked() or app.act_clone.isChecked())
+    want_split = bool(app.repair_mode or app.clone_mode or pending_split)
+    app.plotter_ref.setVisible(want_split)
+    app.vline.setVisible(want_split)
 
     if app.repair_mode and not app.act_annotation_mode.isChecked():
         app.act_annotation_mode.setChecked(True)
@@ -466,46 +471,50 @@ def toggle_repair_mode(app, on: bool) -> None:
         update_cursor(app)
 
         app.act_eraser.setChecked(True)
-    else:
+    elif not app.clone_mode:
         app.act_eraser.setChecked(False)
 
     if hasattr(app, "left_title"):
-        app.left_title.setVisible(app.repair_mode)
+        app.left_title.setVisible(want_split)
 
     if app.repair_mode and hasattr(app, "cloud_ref"):
         app.cloud_ref["RGB"] = app.original_colors.astype(np.uint8)
 
-    if app.repair_mode:
+    if want_split:
         app._link_cameras()
     else:
         app._unlink_cameras()
 
-    QtCore.QTimer.singleShot(0, app._position_overlays)
-    app._schedule_fit()
+    if was_split != want_split:
+        QtCore.QTimer.singleShot(0, app._finalize_layout)
+    else:
+        QtCore.QTimer.singleShot(0, app._position_overlays)
     update_annotation_visibility(app)
 
 
 def toggle_clone_mode(app, on: bool) -> None:
-    if on:
+    was_split = bool(
+        app.repair_mode or app.clone_mode or app.act_repair.isChecked() or app.act_clone.isChecked()
+    )
+    if on and not was_split:
         app._need_split_fit = True
     app.clone_mode = bool(on)
 
     if on and app.repair_mode:
         app.act_repair.setChecked(False)
 
+    pending_split = bool(app.act_repair.isChecked() or app.act_clone.isChecked())
+    want_split = bool(app.repair_mode or app.clone_mode or pending_split)
+
     if app.clone_mode:
         app.act_annotation_mode.setChecked(True)
         app.act_toggle_annotations.setChecked(True)
 
         app.plotter_ref.setVisible(True)
-        app.vline.setVisible(app.clone_mode)
+        app.vline.setVisible(True)
         if hasattr(app, "left_title"):
             app.left_title.setVisible(True)
-
-        app._link_cameras()
-    else:
-        app._unlink_cameras()
-
+    elif not want_split:
         app.plotter_ref.setVisible(False)
         app.vline.setVisible(False)
         if hasattr(app, "left_title"):
@@ -513,7 +522,15 @@ def toggle_clone_mode(app, on: bool) -> None:
 
         app.current_color = app._last_paint_color.copy()
 
-    QtCore.QTimer.singleShot(0, app._finalize_layout)
+    if want_split:
+        app._link_cameras()
+    else:
+        app._unlink_cameras()
+
+    if was_split != want_split:
+        QtCore.QTimer.singleShot(0, app._finalize_layout)
+    else:
+        QtCore.QTimer.singleShot(0, app._position_overlays)
     update_cursor(app)
 
 

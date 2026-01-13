@@ -28,7 +28,7 @@ Usage:
 import sys
 from pathlib import Path
 
-from PyQt5 import QtWidgets
+from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtGui import QIcon
 
 from configs.constants import (
@@ -146,6 +146,9 @@ class Annotator(QtWidgets.QMainWindow):
 
     def _release_view_combo_focus(self):
         return app_helpers.release_view_combo_focus(self)
+
+    def _on_nav_visibility_changed(self, visible: bool):
+        return app_helpers.on_nav_visibility_changed(self, visible)
 
     def _build_nav_dock(self):
         return build_nav_dock(self)
@@ -305,6 +308,10 @@ class Annotator(QtWidgets.QMainWindow):
 
     def closeEvent(self, e):
         return app_helpers.close_event(self, e)
+
+    def changeEvent(self, event):
+        app_helpers.on_change_event(self, event)
+        return super().changeEvent(event)
 
     def _sync_renders(self):
         return camera.sync_renders(self)
