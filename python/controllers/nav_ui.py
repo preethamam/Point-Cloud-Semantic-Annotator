@@ -23,7 +23,8 @@ def on_nav_search_entered(app) -> None:
             app.setFocus()
         return
 
-    if text.isdigit():
+    text_is_index = text.isdigit()
+    if text_is_index:
         idx = int(text) - 1
         if 0 <= idx < len(app.files):
             app._maybe_autosave_before_nav()
@@ -36,9 +37,7 @@ def on_nav_search_entered(app) -> None:
             app._update_status_bar()
             app._nav_release_pending = True
             QtCore.QTimer.singleShot(0, app._reset_nav_search)
-        else:
-            app.nav_status.setText("Index out of range")
-        return
+            return
 
     text_low = text.lower()
     matches = [
@@ -47,7 +46,10 @@ def on_nav_search_entered(app) -> None:
     ]
 
     if not matches:
-        app.nav_status.setText("No matching filenames")
+        if text_is_index:
+            app.nav_status.setText("Index out of range")
+        else:
+            app.nav_status.setText("No matching filenames")
         return
 
     idx = matches[0]

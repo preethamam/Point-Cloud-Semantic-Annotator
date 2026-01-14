@@ -48,6 +48,8 @@ def event_filter(app, obj, event):
     if obj is getattr(app, "nav_search", None):
         if event.type() == QtCore.QEvent.FocusIn and getattr(app, "_nav_release_pending", False):
             app._nav_release_pending = False
+            if event.reason() == QtCore.Qt.MouseFocusReason:
+                return False
             QtCore.QTimer.singleShot(0, lambda: app.plotter.interactor.setFocus())
             return True
 
