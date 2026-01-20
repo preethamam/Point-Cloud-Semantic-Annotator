@@ -17,6 +17,10 @@ def build_menubar(app) -> None:
     app.act_open_ann.triggered.connect(app.open_ann_folder)
     file_menu.addAction(app.act_open_ann)
 
+    app.act_refresh_folders = QtWidgets.QAction("Refresh Folders", app)
+    app.act_refresh_folders.triggered.connect(app.refresh_folders)
+    file_menu.addAction(app.act_refresh_folders)
+
     file_menu.addSeparator()
 
     app.act_save = QtWidgets.QAction("Save", app)
@@ -40,6 +44,7 @@ def build_menubar(app) -> None:
     app.act_exit = QtWidgets.QAction("Exit", app)
     app.act_exit.triggered.connect(app.close)
     file_menu.addAction(app.act_exit)
+
 
     edit_menu = menubar.addMenu("&Edit")
 

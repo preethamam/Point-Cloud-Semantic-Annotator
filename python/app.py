@@ -165,6 +165,9 @@ class Annotator(QtWidgets.QMainWindow):
     def open_orig_folder(self):
         return io.open_orig_folder(self)
 
+    def refresh_folders(self):
+        return io.refresh_folders(self)
+
     def load_cloud(self):
         return io.load_cloud(self)
 

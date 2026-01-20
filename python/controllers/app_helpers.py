@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from PyQt5 import QtCore, QtWidgets
 
+from configs.constants import VERSION_NUMBER
 from services.storage import save_state
 
 
@@ -66,9 +67,9 @@ def show_about_dialog(app) -> None:
     QtWidgets.QMessageBox.about(
         app,
             "About Point Cloud Annotator",
-            """
+            f"""
     <b>Point Cloud Annotator</b><br>
-    Version 2.0.0<br><br>
+    Version {VERSION_NUMBER}<br><br>
 
     <b>Description</b><br>
     Point Cloud Annotator is a professional tool for semantic annotation,

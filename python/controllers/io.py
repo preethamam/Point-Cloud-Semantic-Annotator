@@ -161,7 +161,80 @@ def open_orig_folder(app) -> None:
         app.act_open_ann.setEnabled(True)
 
 
+def refresh_folders(app, *, reload: bool = True, show_message: bool = True) -> bool:
+    if not app.ann_dir and not app.orig_dir:
+        if show_message:
+            QtWidgets.QMessageBox.information(
+                app, "Refresh Folders", "No annotation or original folder selected."
+            )
+        return False
+
+    if app.ann_dir:
+        app.directory = app.ann_dir
+        app.files = app._get_sorted_files()
+    else:
+        app.directory = None
+        app.files = []
+
+    if not app.files:
+        app.index = 0
+        app.history.clear()
+        app.redo_stack.clear()
+        app._visited.clear()
+        app._annotated.clear()
+        app._dirty.clear()
+        app.thumbs.new_generation()
+        app.thumbs.prune_ann_thumbs()
+        app._populate_nav_list()
+        app._update_status_bar()
+        if show_message:
+            QtWidgets.QMessageBox.information(
+                app, "Refresh Folders", "No PLY/PCD files in the annotation folder."
+            )
+        return False
+
+    if app.orig_dir is not None:
+        has_full_match = all((app.orig_dir / p.name).exists() for p in app.files)
+        if not has_full_match:
+            log_gui(f"refresh_folders: orig_dir cleared (mismatch) orig_dir={app.orig_dir}")
+            app.orig_dir = None
+
+    if app.index < 0 or app.index >= len(app.files):
+        app.index = 0
+
+    app.thumbs.new_generation()
+    app.thumbs.prune_ann_thumbs()
+    app._populate_nav_list()
+    app._sync_nav_selection()
+    app._update_status_bar()
+
+    if reload:
+        app.history.clear()
+        app.redo_stack.clear()
+        app.load_cloud()
+        app._position_overlays()
+
+    save_state({
+        "annotation_dir": str(app.ann_dir or ""),
+        "original_dir": str(app.orig_dir or ""),
+        "index": int(app.index),
+        "nav_dock_width": int(app.nav_dock.width()),
+        "last_ann_dir": str(app.ann_dir or ""),
+        "project_pairs": _project_pairs_for(app),
+    })
+
+    log_gui(f"refresh_folders: files={len(app.files)} orig_dir={app.orig_dir}")
+    return True
+
+
 def load_cloud(app) -> None:
+    if not app.files or app.index < 0 or app.index >= len(app.files):
+        ready = refresh_folders(app, reload=False, show_message=False)
+        if not ready or not app.files:
+            return
+        if app.index < 0 or app.index >= len(app.files):
+            return
+
     app._visited.add(app.index)
     app._decorate_nav_item(app.index)
 

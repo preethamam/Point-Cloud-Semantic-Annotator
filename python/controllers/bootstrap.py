@@ -239,6 +239,8 @@ def restore_state(app) -> None:
             app.orig_dir = Path(cand) if cand else None
             app.directory = app.ann_dir
             app.files = app._get_sorted_files()
+            if app.files and (app.index < 0 or app.index >= len(app.files)):
+                app.index = 0
             if app.orig_dir is not None:
                 has_full_match = all((app.orig_dir / p.name).exists() for p in app.files)
                 if not has_full_match:
