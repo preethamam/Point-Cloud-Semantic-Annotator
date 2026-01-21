@@ -79,14 +79,12 @@ def show_about_dialog(app) -> None:
 
     <b>Key Features</b>
     <ul>
-    <li>Brush-based semantic painting with undo/redo</li>
-    <li>Repair and clone modes with synchronized dual views</li>
-    <li>Gamma-based contrast enhancement and auto-contrast</li>
-    <li>Fast navigation with thumbnails and loop playback</li>
-    <li>Session persistence and autosave support</li>
-    </ul>
-
-    <b>Technology Stack</b><br>
+        <li>Brush-based semantic painting with undo/redo</li>
+        <li>Repair and clone modes with synchronized dual views</li>
+        <li>Gamma-based contrast enhancement and auto-contrast</li>
+        <li>Fast navigation with thumbnails and loop playback</li>
+        <li>Session persistence and autosave support</li>
+    </ul><b>Technology Stack</b><br>
     Python · PyQt5 · PyVista · VTK · NumPy · SciPy<br><br>
 
     <b>License</b><br>
