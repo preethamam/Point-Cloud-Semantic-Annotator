@@ -26,6 +26,7 @@ Usage:
   python app.py
 """
 import sys
+import traceback
 from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets
@@ -65,6 +66,48 @@ from ui.nav_dock import (
 )
 from ui.overlays import position_overlays
 from ui.layout import build_ui, install_ribbon_toolbar
+from services.storage import log_gui
+
+
+def _show_non_blocking_error(title: str, message: str, details: str | None = None) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    msg = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Critical, title, message)
+    if details:
+        msg.setDetailedText(details)
+    msg.setModal(False)
+    msg.setAttribute(QtCore.Qt.WA_DeleteOnClose)
+    if not hasattr(app, "_error_dialogs"):
+        app._error_dialogs = []
+    app._error_dialogs.append(msg)
+
+    def _cleanup(_result=None):
+        try:
+            app._error_dialogs.remove(msg)
+        except ValueError:
+            pass
+
+    msg.finished.connect(_cleanup)
+    msg.show()
+
+
+def _handle_exception(exc_type, exc, tb) -> None:
+    if exc_type is KeyboardInterrupt:
+        sys.__excepthook__(exc_type, exc, tb)
+        return
+    details = "".join(traceback.format_exception(exc_type, exc, tb))
+    log_gui(f"Unhandled exception:\n{details}")
+    _show_non_blocking_error("Unexpected Error", str(exc), details)
+
+
+class SafeApplication(QtWidgets.QApplication):
+    def notify(self, receiver, event):
+        try:
+            return super().notify(receiver, event)
+        except Exception:
+            _handle_exception(*sys.exc_info())
+            return False
 
 
 class Annotator(QtWidgets.QMainWindow):
@@ -423,7 +466,8 @@ class Annotator(QtWidgets.QMainWindow):
 
 
 if __name__ == '__main__':
-    app = QtWidgets.QApplication(sys.argv)
+    sys.excepthook = _handle_exception
+    app = SafeApplication(sys.argv)
     win = Annotator()
     win.show()
     sys.exit(app.exec_())

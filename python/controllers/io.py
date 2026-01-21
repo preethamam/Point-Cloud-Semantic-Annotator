@@ -235,13 +235,51 @@ def load_cloud(app) -> None:
         if app.index < 0 or app.index >= len(app.files):
             return
 
+    def _read_cloud(path: Path) -> pv.PolyData:
+        pc_local = pv.read(str(path))
+        if getattr(pc_local, "n_points", 0) <= 0:
+            raise ValueError("Point cloud contains no points.")
+        return pc_local
+
+    start_index = app.index
+    pc = None
+    last_error = None
+    for _ in range(len(app.files)):
+        path = app.files[app.index]
+        try:
+            pc = _read_cloud(path)
+            if "RGB" not in pc.array_names:
+                pc["RGB"] = np.zeros((pc.n_points, 3), dtype=np.uint8)
+            break
+        except Exception as exc:
+            last_error = exc
+            log_gui(f"load_cloud: failed index={app.index} path={path} err={exc}")
+            QtWidgets.QMessageBox.warning(
+                app,
+                "Load Error",
+                f"Failed to load point cloud:\n{path}\n\n{exc}",
+            )
+            if getattr(app, "_bad_files", None) is None:
+                app._bad_files = set()
+            app._bad_files.add(app.index)
+            app.index = (app.index + 1) % len(app.files)
+            if app.index == start_index:
+                break
+
+    if pc is None:
+        msg = "No valid point clouds could be loaded."
+        if last_error is not None:
+            msg = f"{msg}\n\nLast error:\n{last_error}"
+        QtWidgets.QMessageBox.information(app, "Load Error", msg)
+        return
+
+    if app.index != start_index:
+        app._sync_nav_selection()
+
     app._visited.add(app.index)
     app._decorate_nav_item(app.index)
 
-    pc = pv.read(str(app.files[app.index]))
     app._begin_batch()
-    if "RGB" not in pc.array_names:
-        pc["RGB"] = np.zeros((pc.n_points, 3), dtype=np.uint8)
 
     app.cloud = pc
 
@@ -251,9 +289,12 @@ def load_cloud(app) -> None:
     if app.orig_dir:
         cand = app.orig_dir / Path(app.files[app.index]).name
         if cand.exists():
-            pc0 = pv.read(str(cand))
-            if "RGB" in pc0.array_names and pc0.n_points == pc.n_points:
-                app.original_colors = pc0["RGB"].copy()
+            try:
+                pc0 = pv.read(str(cand))
+                if "RGB" in pc0.array_names and pc0.n_points == pc.n_points:
+                    app.original_colors = pc0["RGB"].copy()
+            except Exception as exc:
+                log_gui(f"load_cloud: failed orig read path={cand} err={exc}")
 
     app.kdtree = cKDTree(pc.points)
 
