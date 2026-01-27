@@ -9,6 +9,7 @@ from scipy.spatial import cKDTree
 from vtkmodules.vtkIOPLY import vtkPLYWriter
 
 from services.storage import load_state, log_gui, save_state
+from controllers import app_helpers
 
 
 def natural_key(path):
@@ -304,13 +305,20 @@ def load_cloud(app) -> None:
 
     app._pre_fit_camera(app.cloud, app.plotter)
     app.plotter.clear()
+    render_points_as_spheres = (
+        app.act_points_spheres.isChecked()
+        if hasattr(app, "act_points_spheres")
+        else app_helpers.render_points_as_spheres(app)
+    )
+    app_helpers._log_gl_info_once(app, render_points_as_spheres)
+
     app.actor = app.plotter.add_points(
         app.cloud,
         scalars="RGB",
         rgb=True,
         point_size=app.point_size,
         reset_camera=False,
-        render_points_as_spheres=True,
+        render_points_as_spheres=render_points_as_spheres,
     )
 
     app.plotter_ref.clear()
@@ -325,7 +333,7 @@ def load_cloud(app) -> None:
         rgb=True,
         point_size=app.point_size,
         reset_camera=False,
-        render_points_as_spheres=True,
+        render_points_as_spheres=render_points_as_spheres,
     )
 
     app._pre_fit_camera(app.cloud, app.plotter)

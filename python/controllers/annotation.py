@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtGui import QColor, QCursor, QPainter, QPixmap
+from PyQt5.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap
 from scipy.stats import gaussian_kde
 from vtkmodules.vtkRenderingCore import vtkPropPicker
 import matplotlib
 
 matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
+from controllers import app_helpers
 
 
 def toggle_annotation(app) -> None:
@@ -143,12 +144,18 @@ def change_point(app, val) -> None:
     v = max(1, min(int(val), 20))
     app.point_size = v
 
+    render_points_as_spheres = (
+        app.act_points_spheres.isChecked()
+        if hasattr(app, "act_points_spheres")
+        else app_helpers.render_points_as_spheres(app)
+    )
+
     def _apply_point_size(actor, render_fn):
         try:
             prop = actor.GetProperty()
             prop.SetPointSize(v)
             try:
-                prop.SetRenderPointsAsSpheres(True)
+                prop.SetRenderPointsAsSpheres(render_points_as_spheres)
             except Exception:
                 pass
             if not getattr(app, "_is_closing", False) and not getattr(app, "_batch", False):
@@ -170,8 +177,26 @@ def pick_color(app) -> None:
     if app.clone_mode:
         return
 
-    c = QtWidgets.QColorDialog.getColor()
-    if c.isValid():
+    dialog = QtWidgets.QColorDialog(app)
+    dialog.setWindowTitle("Select Color")
+    if app.current_color is not None:
+        dialog.setCurrentColor(QColor(*app.current_color))
+
+    icon = app.windowIcon()
+    if icon is not None and not icon.isNull():
+        dialog.setWindowIcon(icon)
+    else:
+        from pathlib import Path
+
+        base = Path(__file__).resolve().parents[1]
+        for name in ("app.png", "app.ico"):
+            candidate = base / "icons" / name
+            if candidate.exists():
+                dialog.setWindowIcon(QIcon(str(candidate)))
+                break
+
+    if dialog.exec_() == QtWidgets.QDialog.Accepted:
+        c = dialog.currentColor()
         app.current_color = [c.red(), c.green(), c.blue()]
         app._last_paint_color = app.current_color.copy()
         app.act_eraser.setChecked(False)
@@ -226,7 +251,9 @@ def on_click(app, x, y) -> None:
     app._session_edited[idx] = True
     app._mark_dirty_once()
     if hasattr(app, "toggle_ann_chk"):
-        app.toggle_ann_chk.setEnabled(bool(np.any(app._session_edited)))
+        app.toggle_ann_chk.setEnabled(True)
+    if hasattr(app, "act_toggle_annotations"):
+        app.act_toggle_annotations.setEnabled(True)
 
     update_annotation_visibility(app)
 
@@ -238,7 +265,23 @@ def on_undo(app) -> None:
     app.redo_stack.append((idx, app.colors[idx].copy()))
     app.colors[idx] = old
     app._session_edited[idx] = False
-    app.act_toggle_annotations.setEnabled(bool(np.any(app._session_edited)))
+    if hasattr(app, "act_toggle_annotations"):
+        app.act_toggle_annotations.setEnabled(True)
+    if hasattr(app, "toggle_ann_chk"):
+        app.toggle_ann_chk.setEnabled(True)
+    if not np.any(app._session_edited):
+        app._dirty.discard(app.index)
+        app._decorate_nav_item(app.index)
+        app._update_status_bar()
+        try:
+            app.statusBar().showMessage("Undo: no unsaved edits", 1500)
+        except Exception:
+            pass
+    else:
+        try:
+            app.statusBar().showMessage("Undo: unsaved edits remain", 1500)
+        except Exception:
+            pass
     update_annotation_visibility(app)
 
 
@@ -249,7 +292,15 @@ def on_redo(app) -> None:
     app.history.append((idx, app.colors[idx].copy()))
     app.colors[idx] = cols
     app._session_edited[idx] = True
-    app.act_toggle_annotations.setEnabled(bool(np.any(app._session_edited)))
+    if hasattr(app, "act_toggle_annotations"):
+        app.act_toggle_annotations.setEnabled(True)
+    if hasattr(app, "toggle_ann_chk"):
+        app.toggle_ann_chk.setEnabled(True)
+    app._mark_dirty_once()
+    try:
+        app.statusBar().showMessage("Redo: unsaved edits present", 1500)
+    except Exception:
+        pass
     update_annotation_visibility(app)
 
 

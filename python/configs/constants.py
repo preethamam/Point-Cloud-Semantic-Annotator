@@ -5,7 +5,7 @@ from pathlib import Path
 from appdirs import user_data_dir
 
 APP_NAME = "Point Cloud Annotator"
-VERSION_NUMBER = "2.2.0"
+VERSION_NUMBER = "2.3.0"
 
 STATE_DIR = Path(user_data_dir(APP_NAME, appauthor=False))
 STATE_FILE = STATE_DIR / "state.json"

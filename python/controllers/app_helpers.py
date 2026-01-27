@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import os
+import platform
+
 from PyQt5 import QtCore, QtWidgets
 
 from configs.constants import VERSION_NUMBER
-from services.storage import save_state
+from services.storage import log_gui, save_state
 
 
 def release_view_combo_focus(app) -> None:
@@ -61,6 +64,139 @@ def is_split_mode(app) -> bool:
 
 def shared_cam_active(app) -> bool:
     return bool(is_split_mode(app) and app._shared_camera is not None)
+
+
+def _env_flag(name: str):
+    val = os.getenv(name)
+    if val is None:
+        return None
+    val = val.strip().lower()
+    if val in ("1", "true", "yes", "on", "y"):
+        return True
+    if val in ("0", "false", "no", "off", "n"):
+        return False
+    return None
+
+
+def _get_opengl_info(app) -> tuple[str, str]:
+    cached = getattr(app, "_gl_info", None)
+    if isinstance(cached, tuple) and len(cached) == 2:
+        return cached
+
+    vendor = ""
+    renderer = ""
+    try:
+        if hasattr(app, "plotter"):
+            try:
+                app.plotter.render()
+            except Exception:
+                pass
+            ren_win = app.plotter.ren_win
+            if hasattr(ren_win, "GetOpenGLVendor"):
+                v = ren_win.GetOpenGLVendor()
+                if v:
+                    vendor = str(v)
+            if hasattr(ren_win, "GetOpenGLRenderer"):
+                r = ren_win.GetOpenGLRenderer()
+                if r:
+                    renderer = str(r)
+            if hasattr(ren_win, "ReportCapabilities"):
+                report = ren_win.ReportCapabilities()
+                if isinstance(report, bytes):
+                    report = report.decode(errors="ignore")
+                if isinstance(report, str):
+                    for line in report.splitlines():
+                        if "OpenGL vendor string" in line and not vendor:
+                            vendor = line.split(":", 1)[-1].strip()
+                        elif "OpenGL renderer string" in line and not renderer:
+                            renderer = line.split(":", 1)[-1].strip()
+    except Exception:
+        vendor = ""
+        renderer = ""
+
+    app._gl_info = (vendor, renderer)
+    return vendor, renderer
+
+
+def _set_gl_status(app, spheres_enabled: bool, source: str | None = None) -> None:
+    vendor, renderer = _get_opengl_info(app)
+    mode = "Spheres" if spheres_enabled else "Points"
+    if source == "env":
+        mode = f"{mode} (env)"
+    elif source == "ui":
+        mode = f"{mode} (ui)"
+    if hasattr(app, "sb_gl"):
+        v = vendor if vendor else "Unknown vendor"
+        r = renderer if renderer else "Unknown renderer"
+        app.sb_gl.setText(f"OpenGL: {v} | {r} | {mode}")
+
+
+def render_points_as_spheres(app) -> bool:
+    cached = getattr(app, "_render_points_as_spheres", None)
+    if isinstance(cached, bool):
+        return cached
+
+    env_override = _env_flag("PCA_RENDER_POINTS_AS_SPHERES")
+    if env_override is not None:
+        app._render_points_source = "env"
+        app._render_points_as_spheres = env_override
+        _log_gl_info_once(app, env_override)
+        return env_override
+
+    decision = True
+
+    app._render_points_source = "auto"
+    app._render_points_as_spheres = decision
+    _log_gl_info_once(app, decision)
+    return decision
+
+
+def _log_gl_info_once(app, spheres_enabled: bool) -> None:
+    if getattr(app, "_gl_info_logged", False):
+        return
+    vendor, renderer = _get_opengl_info(app)
+    source = getattr(app, "_render_points_source", "auto")
+    _set_gl_status(app, spheres_enabled, source=source)
+    log_gui(
+        f"OpenGL: vendor='{vendor}' renderer='{renderer}' "
+        f"points_as_spheres={spheres_enabled} source={source}"
+    )
+    app._gl_info_logged = True
+
+
+def set_points_render_mode(app, on: bool) -> None:
+    app._render_points_as_spheres = bool(on)
+    app._render_points_source = "ui"
+
+    if hasattr(app, "actor") and app.actor is not None:
+        try:
+            app.actor.GetProperty().SetRenderPointsAsSpheres(bool(on))
+        except Exception:
+            pass
+
+    if hasattr(app, "actor_ref") and app.actor_ref is not None:
+        try:
+            app.actor_ref.GetProperty().SetRenderPointsAsSpheres(bool(on))
+        except Exception:
+            pass
+
+    _set_gl_status(app, bool(on), source="ui")
+    vendor, renderer = _get_opengl_info(app)
+    log_gui(
+        f"OpenGL: vendor='{vendor}' renderer='{renderer}' "
+        f"points_as_spheres={bool(on)} source=ui"
+    )
+
+    if not getattr(app, "_is_closing", False) and not getattr(app, "_batch", False):
+        try:
+            app.plotter.render()
+        except Exception:
+            pass
+        try:
+            if hasattr(app, "plotter_ref") and app.plotter_ref.isVisible():
+                app.plotter_ref.render()
+        except Exception:
+            pass
 
 
 def show_about_dialog(app) -> None:

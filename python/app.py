@@ -331,6 +331,9 @@ class Annotator(QtWidgets.QMainWindow):
     def set_annotations_visible(self, vis: bool):
         return annotation.set_annotations_visible(self, vis)
 
+    def set_points_render_mode(self, on: bool):
+        return app_helpers.set_points_render_mode(self, on)
+
     def _current_base(self):
         return annotation.current_base(self)
 

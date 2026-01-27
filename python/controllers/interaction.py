@@ -181,6 +181,8 @@ def event_filter(app, obj, event):
                     app._mark_dirty_once()
                     if hasattr(app, "toggle_ann_chk"):
                         app.toggle_ann_chk.setEnabled(True)
+                    if hasattr(app, "act_toggle_annotations"):
+                        app.act_toggle_annotations.setEnabled(True)
                     app._blend_into_mesh_subset(idxs)
 
                 app._line_len_px = t1 * dist
@@ -219,6 +221,8 @@ def event_filter(app, obj, event):
                     app._mark_dirty_once()
                     if hasattr(app, "toggle_ann_chk"):
                         app.toggle_ann_chk.setEnabled(True)
+                    if hasattr(app, "act_toggle_annotations"):
+                        app.act_toggle_annotations.setEnabled(True)
                     app._blend_into_mesh_subset(idxs)
 
             app._last_paint_xy = (x, y)

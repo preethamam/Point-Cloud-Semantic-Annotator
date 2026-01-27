@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import QShortcut
 
 from configs.constants import NAV_DOCK_WIDTH, NAV_NAME_MAX, NAV_THUMB_SIZE
 from services.storage import load_state, log_gui, save_state
+from controllers import app_helpers
 from services.thumbnail import ThumbnailService
 
 
@@ -19,6 +20,10 @@ def init_actions(app) -> None:
     app.act_toggle_annotations = QtWidgets.QAction(app)
     app.act_toggle_annotations.setCheckable(True)
     app.act_toggle_annotations.setChecked(True)
+
+    app.act_points_spheres = QtWidgets.QAction(app)
+    app.act_points_spheres.setCheckable(True)
+    app.act_points_spheres.setChecked(True)
 
     app.act_clone = QtWidgets.QAction(app)
     app.act_clone.setCheckable(True)
@@ -145,6 +150,9 @@ def init_status_bar(app) -> None:
         }
     """)
 
+    app.sb_gl = QtWidgets.QLabel("")
+    app.sb_gl.setStyleSheet("padding: 0 6px;")
+
     app.sb_index = QtWidgets.QLabel("")
     app.sb_anno = QtWidgets.QLabel("")
     app.sb_loop = QtWidgets.QLabel("")
@@ -154,6 +162,7 @@ def init_status_bar(app) -> None:
         w.setStyleSheet("padding: 0 6px;")
 
     sb.addPermanentWidget(app.sb_viewing)
+    sb.addPermanentWidget(app.sb_gl)
     sb.addPermanentWidget(QtWidgets.QWidget(), 1)
     sb.addPermanentWidget(app.sb_index)
     sb.addPermanentWidget(app.sb_anno)

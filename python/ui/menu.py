@@ -82,7 +82,9 @@ def build_menubar(app) -> None:
 
     color_menu = edit_menu.addMenu("Color")
 
-    app.act_pick_color = QtWidgets.QAction("Pick Color.", app)
+    app.act_pick_color = QtWidgets.QAction("Pick Color", app)
+    pick_icon = QIcon(QPixmap("icons/color-pick.png").scaled(14, 14, QtCore.Qt.KeepAspectRatio, QtCore.Qt.SmoothTransformation))
+    app.act_pick_color.setIcon(pick_icon)
     app.act_pick_color.triggered.connect(app.pick_color)
     color_menu.addAction(app.act_pick_color)
 
@@ -98,7 +100,7 @@ def build_menubar(app) -> None:
     ]
     for name, hexcol in app._SWATCHES:
         act = QtWidgets.QAction(name, app)
-        pix = QPixmap(12, 12)
+        pix = QPixmap(14, 14)
         pix.fill(QColor(hexcol))
         act.setIcon(QIcon(pix))
         act.triggered.connect(lambda _, c=hexcol: app.select_swatch(c, None))
@@ -153,6 +155,14 @@ def build_menubar(app) -> None:
     app.act_toggle_annotations.setShortcut(QKeySequence("Shift+A"))
     app.act_toggle_annotations.toggled.connect(app.set_annotations_visible)
     view_menu.addAction(app.act_toggle_annotations)
+
+    view_menu.addSeparator()
+
+    app.act_points_spheres.setText("Render Points as Spheres")
+    app.act_points_spheres.setShortcut(QKeySequence("Shift+P"))
+    app.act_points_spheres.setShortcutContext(QtCore.Qt.ApplicationShortcut)
+    app.act_points_spheres.toggled.connect(app.set_points_render_mode)
+    view_menu.addAction(app.act_points_spheres)
 
     view_menu.addSeparator()
 
