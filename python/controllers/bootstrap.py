@@ -6,7 +6,7 @@ from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import QShortcut
 
-from configs.constants import NAV_DOCK_WIDTH, NAV_NAME_MAX, NAV_THUMB_SIZE
+from configs.constants import NAV_DOCK_WIDTH, NAV_NAME_MAX, NAV_THUMB_SIZE, NAV_FAST_THRESHOLD, NAV_FAST_ICON_BATCH
 from services.storage import load_state, log_gui, save_state
 from controllers import app_helpers
 from services.thumbnail import ThumbnailService
@@ -44,6 +44,8 @@ def init_actions(app) -> None:
 def init_state(app) -> None:
     app.NAV_THUMB_SIZE = NAV_THUMB_SIZE
     app.NAV_NAME_MAX = NAV_NAME_MAX
+    app.NAV_FAST_THRESHOLD = NAV_FAST_THRESHOLD
+    app.NAV_FAST_ICON_BATCH = NAV_FAST_ICON_BATCH
     app.brush_size = 8
     app.initial_loop_timer = 1.0
     app.point_size = 6
@@ -101,6 +103,9 @@ def init_state(app) -> None:
     app._pending_orig_dir = None
     app._nav_last_width = NAV_DOCK_WIDTH
     app._nav_was_visible = True
+    app._nav_fast_mode = False
+    app._nav_fast_icon_timer = None
+    app._nav_fast_icon_idx = 0
 
 
 def init_timers(app) -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 from appdirs import user_data_dir
 
 APP_NAME = "Point Cloud Annotator"
-VERSION_NUMBER = "2.3.0"
+VERSION_NUMBER = "2.4.0"
 
 STATE_DIR = Path(user_data_dir(APP_NAME, appauthor=False))
 STATE_FILE = STATE_DIR / "state.json"
@@ -23,3 +23,5 @@ NAV_THUMB_SIZE = THUMB_SIZE
 NAV_NAME_MAX = 30
 NAV_DOCK_WIDTH = 155
 RIBBON_ENH_VIEW_HEIGHT = 88
+NAV_FAST_THRESHOLD = 50000
+NAV_FAST_ICON_BATCH = 300

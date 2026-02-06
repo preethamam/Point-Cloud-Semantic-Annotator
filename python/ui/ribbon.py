@@ -137,6 +137,9 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     chk_loop.setChecked(app.act_loop.isChecked())
     chk_loop.toggled.connect(app.act_loop.setChecked)
     app.act_loop.toggled.connect(chk_loop.setChecked)
+    
+    btn_revision = _ribbon_button(app._icon_revision(), "Revise / Move To Folder (M)")
+    btn_revision.clicked.connect(app.move_current_to_folder)
 
     delay = QtWidgets.QLineEdit()
     delay.setText(f"{app.loop_delay_sec:.2f}")
@@ -229,8 +232,9 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     nav_row_layout.setContentsMargins(0, 0, 0, 0)
     nav_row_layout.setSpacing(2)
     nav_row_layout.addWidget(btn_prev)
-    nav_row_layout.addWidget(btn_next)
+    nav_row_layout.addWidget(btn_next)    
     nav_row_layout.addWidget(chk_loop)
+    nav_row_layout.addWidget(btn_revision)
 
     nav.add(nav_row)
     delay_container = QtWidgets.QWidget()

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtWidgets, QtGui
 
 
 def build_nav_dock(app) -> None:
@@ -130,6 +130,27 @@ def make_nav_item_widget(app, idx: int):
 
 
 def decorate_nav_item(app, idx: int) -> None:
+    if getattr(app, "_nav_fast_mode", False):
+        if not hasattr(app, "nav_list"):
+            return
+        item = app.nav_list.item(idx)
+        if item is None:
+            return
+
+        if idx in app._visited:
+            item.setBackground(QtGui.QColor("#d0e7ff"))
+        else:
+            item.setBackground(QtGui.QBrush())
+
+        flags = []
+        if idx in app._dirty:
+            flags.append("M")
+        if idx in app._annotated:
+            flags.append("A")
+        suffix = f" [{' '.join(flags)}]" if flags else ""
+        item.setText(app._nav_row_text(idx) + suffix)
+        return
+
     if not hasattr(app, "_nav_item_widgets"):
         return
 

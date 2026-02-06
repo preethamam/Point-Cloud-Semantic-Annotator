@@ -21,6 +21,19 @@ def build_menubar(app) -> None:
     app.act_refresh_folders.triggered.connect(app.refresh_folders)
     file_menu.addAction(app.act_refresh_folders)
 
+    app.act_select_move_folder = QtWidgets.QAction("Select Revise / Move To Folder", app)
+    app.act_select_move_folder.setShortcut(QKeySequence("Shift+M"))
+    app.act_select_move_folder.setShortcutContext(QtCore.Qt.ApplicationShortcut)
+    app.act_select_move_folder.triggered.connect(app.select_revise_move_folder)
+    file_menu.addAction(app.act_select_move_folder)
+
+    app.act_move_to_folder = QtWidgets.QAction("Revise / Move To Folder", app)
+    app.act_move_to_folder.setShortcut(QKeySequence("M"))
+    app.act_move_to_folder.setShortcutContext(QtCore.Qt.ApplicationShortcut)
+    # app.act_move_to_folder.setIcon(app._icon_revision())
+    app.act_move_to_folder.triggered.connect(app.move_current_to_folder)
+    file_menu.addAction(app.act_move_to_folder)
+
     file_menu.addSeparator()
 
     app.act_save = QtWidgets.QAction("Save", app)

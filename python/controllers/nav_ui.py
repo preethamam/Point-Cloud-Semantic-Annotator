@@ -95,6 +95,13 @@ def populate_nav_list(app) -> None:
 
     app._nav_item_widgets = {}
     app.thumbs.reset_queue()
+    app._nav_fast_mode = len(app.files) >= getattr(app, "NAV_FAST_THRESHOLD", 50000)
+
+    if app._nav_fast_icon_timer is not None:
+        try:
+            app._nav_fast_icon_timer.stop()
+        except Exception:
+            pass
 
     app.nav_list.blockSignals(True)
     app.nav_list.clear()
@@ -103,17 +110,28 @@ def populate_nav_list(app) -> None:
         app.nav_list.blockSignals(False)
         return
 
-    for i in range(len(app.files)):
-        item = QtWidgets.QListWidgetItem()
-        item.setSizeHint(QtCore.QSize(app.NAV_THUMB_SIZE + 16, app.NAV_THUMB_SIZE + 48))
-        item.setData(QtCore.Qt.UserRole, i)
+    if app._nav_fast_mode:
+        app.nav_list.setIconSize(QtCore.QSize(app.NAV_THUMB_SIZE, app.NAV_THUMB_SIZE))
+        for i in range(len(app.files)):
+            item = QtWidgets.QListWidgetItem()
+            item.setText(app._nav_row_text(i))
+            item.setToolTip(app.files[i].name)
+            item.setData(QtCore.Qt.UserRole, i)
+            item.setSizeHint(QtCore.QSize(app.NAV_THUMB_SIZE + 16, app.NAV_THUMB_SIZE + 24))
+            app.nav_list.addItem(item)
+            app.thumbs.request_thumbnail(i)
+    else:
+        for i in range(len(app.files)):
+            item = QtWidgets.QListWidgetItem()
+            item.setSizeHint(QtCore.QSize(app.NAV_THUMB_SIZE + 16, app.NAV_THUMB_SIZE + 48))
+            item.setData(QtCore.Qt.UserRole, i)
 
-        w = app._make_nav_item_widget(i)
+            w = app._make_nav_item_widget(i)
 
-        app.nav_list.addItem(item)
-        app.nav_list.setItemWidget(item, w)
+            app.nav_list.addItem(item)
+            app.nav_list.setItemWidget(item, w)
 
-        app.thumbs.request_thumbnail(i)
+            app.thumbs.request_thumbnail(i)
 
     app.nav_list.blockSignals(False)
 
@@ -123,6 +141,57 @@ def populate_nav_list(app) -> None:
     for idx in (app._dirty | app._annotated | app._visited):
         if 0 <= idx < max_idx:
             app._decorate_nav_item(idx)
+
+    if app._nav_fast_mode:
+        _schedule_fast_icon_load(app)
+    app._update_status_bar()
+
+
+def _schedule_fast_icon_load(app) -> None:
+    if not hasattr(app, "nav_list"):
+        return
+    if not app._nav_fast_mode:
+        return
+
+    if app._nav_fast_icon_timer is None:
+        app._nav_fast_icon_timer = QtCore.QTimer(app)
+        app._nav_fast_icon_timer.setInterval(10)
+        app._nav_fast_icon_timer.timeout.connect(lambda: _fast_icon_load_step(app))
+
+    app._nav_fast_icon_idx = 0
+    app._nav_fast_icon_timer.start()
+
+
+def _fast_icon_load_step(app) -> None:
+    if not app._nav_fast_mode:
+        if app._nav_fast_icon_timer is not None:
+            app._nav_fast_icon_timer.stop()
+        return
+
+    if not app.files:
+        if app._nav_fast_icon_timer is not None:
+            app._nav_fast_icon_timer.stop()
+        return
+
+    start = int(getattr(app, "_nav_fast_icon_idx", 0))
+    n = len(app.files)
+    if start >= n:
+        app._nav_fast_icon_timer.stop()
+        return
+
+    batch = int(getattr(app, "NAV_FAST_ICON_BATCH", 300))
+    end = min(n, start + max(1, batch))
+
+    for i in range(start, end):
+        icon = app.thumbs.thumb_icon_for_index(i)
+        if icon is not None:
+            item = app.nav_list.item(i)
+            if item is not None:
+                item.setIcon(icon)
+
+    app._nav_fast_icon_idx = end
+    if end >= n:
+        app._nav_fast_icon_timer.stop()
 
 
 def sync_nav_selection(app) -> None:

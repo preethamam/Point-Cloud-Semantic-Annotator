@@ -56,6 +56,7 @@ from ui.icons import (
     icon_repair,
     icon_reset_contrast,
     icon_reset_view,
+    icon_revision,
     icon_zoom,
 )
 from ui.nav_dock import (
@@ -184,6 +185,9 @@ class Annotator(QtWidgets.QMainWindow):
     def _icon_zoom(self, plus=True):
         return icon_zoom(self, plus)
 
+    def _icon_revision(self):
+        return icon_revision(self)
+
     def _build_ribbon(self):
         return build_ribbon(self)
 
@@ -210,6 +214,12 @@ class Annotator(QtWidgets.QMainWindow):
 
     def refresh_folders(self):
         return io.refresh_folders(self)
+
+    def move_current_to_folder(self):
+        return io.move_current_to_folder(self)
+
+    def select_revise_move_folder(self):
+        return io.select_revise_move_folder(self)
 
     def load_cloud(self):
         return io.load_cloud(self)

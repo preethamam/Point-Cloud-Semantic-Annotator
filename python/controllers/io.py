@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 import numpy as np
 import pyvista as pv
@@ -226,6 +227,134 @@ def refresh_folders(app, *, reload: bool = True, show_message: bool = True) -> b
 
     log_gui(f"refresh_folders: files={len(app.files)} orig_dir={app.orig_dir}")
     return True
+
+
+def select_revise_move_folder(app) -> None:
+    try:
+        st = load_state()
+        start_dir = st.get("revise_move_dir", "") or str(app.ann_dir or "")
+    except Exception:
+        start_dir = str(app.ann_dir or "")
+
+    dest_dir = QtWidgets.QFileDialog.getExistingDirectory(
+        app, "Select Revise / Move To Folder", start_dir
+    )
+    if not dest_dir:
+        return
+
+    save_state({"revise_move_dir": str(dest_dir)})
+    log_gui(f"select_revise_move_folder: dir={dest_dir}")
+
+
+def move_current_to_folder(app) -> None:
+    if not app.files or app.index < 0 or app.index >= len(app.files):
+        QtWidgets.QMessageBox.information(
+            app, "Move To Folder", "No point cloud is loaded."
+        )
+        return
+
+    app._maybe_autosave_before_nav()
+
+    try:
+        st = load_state()
+        dest_dir = st.get("revise_move_dir", "")
+    except Exception:
+        dest_dir = ""
+
+    if not dest_dir:
+        QtWidgets.QMessageBox.information(
+            app, "Move To Folder", "Select a destination folder first."
+        )
+        return
+
+    src = Path(app.files[app.index])
+    dest_dir = Path(dest_dir)
+    try:
+        if dest_dir.resolve() == src.parent.resolve():
+            QtWidgets.QMessageBox.information(
+                app, "Move To Folder", "Source and destination are the same folder."
+            )
+            return
+    except Exception:
+        pass
+
+    dest = dest_dir / src.name
+    if dest.exists():
+        reply = QtWidgets.QMessageBox.question(
+            app,
+            "Move To Folder",
+            f"File already exists:\n{dest}\n\nReplace it?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        )
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            dest.unlink()
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                app, "Move To Folder", f"Failed to overwrite:\n{exc}"
+            )
+            return
+
+    try:
+        shutil.move(str(src), str(dest))
+    except Exception as exc:
+        QtWidgets.QMessageBox.warning(
+            app, "Move To Folder", f"Move failed:\n{exc}"
+        )
+        return
+
+    old_files = list(app.files)
+    old_index = app.index
+
+    app.files = app._get_sorted_files()
+
+    name_to_idx = {p.name: i for i, p in enumerate(app.files)}
+
+    def _remap(indices: set[int]) -> set[int]:
+        out = set()
+        for i in indices:
+            if 0 <= i < len(old_files):
+                name = old_files[i].name
+                new_i = name_to_idx.get(name)
+                if new_i is not None:
+                    out.add(new_i)
+        return out
+
+    app._visited = _remap(app._visited)
+    app._annotated = _remap(app._annotated)
+    app._dirty = _remap(app._dirty)
+    if getattr(app, "_bad_files", None) is not None:
+        app._bad_files = _remap(app._bad_files)
+
+    if app.files:
+        app.index = min(old_index, len(app.files) - 1)
+    else:
+        app.index = 0
+
+    app.history.clear()
+    app.redo_stack.clear()
+
+    app.thumbs.new_generation()
+    app.thumbs.prune_ann_thumbs()
+    app._populate_nav_list()
+    app._sync_nav_selection()
+    app._update_status_bar()
+
+    if app.files:
+        app.load_cloud()
+        app._position_overlays()
+
+    save_state({
+        "annotation_dir": str(app.ann_dir or ""),
+        "original_dir": str(app.orig_dir or ""),
+        "index": int(app.index),
+        "nav_dock_width": int(app.nav_dock.width()),
+        "last_ann_dir": str(app.ann_dir or ""),
+        "project_pairs": _project_pairs_for(app),
+    })
+
+    log_gui(f"move_current_to_folder: moved={src} dest={dest} files={len(app.files)}")
 
 
 def load_cloud(app) -> None:

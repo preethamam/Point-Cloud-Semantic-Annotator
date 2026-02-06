@@ -1,6 +1,7 @@
 # Ignore Python application files
 Archive/*
 __pycache__/
+installer/pyinstaller.txt
 *.pyc
 *.pyo
 

@@ -195,3 +195,10 @@ def icon_zoom(app, plus=True):
         if plus:
             p.drawLine(7, 4, 7, 8)
     return _make_icon(16, draw)
+
+
+def icon_revision(app):
+    icon = _icon_from_file("revision.png")
+    if icon is not None:
+        return icon
+    return app.style().standardIcon(QtWidgets.QStyle.SP_DriveFDIcon)

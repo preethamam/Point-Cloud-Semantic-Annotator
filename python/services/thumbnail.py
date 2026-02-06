@@ -268,6 +268,18 @@ class ThumbnailService:
             return None
 
     def refresh_nav_thumbnail(self, idx: int) -> None:
+        if getattr(self.app, "_nav_fast_mode", False):
+            if not hasattr(self.app, "nav_list"):
+                return
+            icon = self.thumb_icon_for_index(idx)
+            if icon is None:
+                return
+            item = self.app.nav_list.item(idx)
+            if item is None:
+                return
+            item.setIcon(icon)
+            return
+
         entry = self.app._nav_item_widgets.get(idx)
         if entry is None:
             return
@@ -340,6 +352,14 @@ class ThumbnailService:
         if hasattr(self.app, "_nav_item_widgets"):
             for entry in self.app._nav_item_widgets.values():
                 entry["img"].clear()
+        if getattr(self.app, "_nav_fast_mode", False):
+            try:
+                for i in range(self.app.nav_list.count()):
+                    item = self.app.nav_list.item(i)
+                    if item is not None:
+                        item.setIcon(QIcon())
+            except Exception:
+                pass
 
         QtWidgets.QMessageBox.information(
             self.app, "Thumbnail Cache", "Thumbnail cache cleared."
