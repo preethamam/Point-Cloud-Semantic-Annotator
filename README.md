@@ -1,4 +1,4 @@
-# Point Cloud Annotator 2.0.0
+# Point Cloud Annotator
 
 Semantic color annotation and review tool for PLY/PCD point clouds. Version 2.0.0 introduces a modular architecture, a ribbon-first UI, dual-view repair/clone workflows, thumbnail-based navigation, and a more precise WYSIWYG brush that respects screen-space point size.
 
@@ -132,6 +132,7 @@ Point Cloud Annotator/
 │     ├─ repair.png
 │     ├─ reset.png
 │     ├─ reset-contrast.png
+|     ├─ revision.png
 │     ├─ view.png
 │     ├─ zoom-in.png
 │     └─ zoom-out.png
@@ -218,31 +219,34 @@ If an original file exists and matches point count, its RGB values are treated a
 
 ## 9. Controls and Shortcuts
 
-| Action                 | Shortcut                 | Notes                            |
-| ---------------------- | ------------------------ | -------------------------------- |
-| Open Annotation Folder | Menu                     | File menu                        |
-| Open Original Folder   | Menu                     | File menu                        |
-| Save                   | Ctrl+S                   | Optional bake of enhanced colors |
-| Autosave               | Menu toggle              | File menu                        |
-| Undo / Redo            | Ctrl+Z / Ctrl+Y          | Per-stroke                       |
-| Annotation Mode        | Ctrl+A                   | Enable brush painting            |
-| Show Annotations       | Shift+A                  | Toggle annotation overlay        |
-| Eraser                 | E                        | Restores original colors         |
-| Repair Mode            | Shift+R                  | Split view + eraser default      |
-| Clone Mode             | C                        | Paint from original colors       |
-| Brush Size             | B then +/-               | 1-200 px                         |
-| Point Size             | D then +/-               | 1-20 px                          |
-| Annotation Alpha       | A then +/-               | 0-100 percent                    |
-| Gamma                  | G then +/-               | 0.1x to 3.0x                     |
-| Zoom                   | Z then +/-               | Cursor-centered zoom             |
-| Reset View             | R                        | Reset camera                     |
-| Views                  | Ctrl+T/B/F/V/L/R/W/E/I/O | Presets                          |
-| Previous / Next        | Left / Right             | Wraps                            |
-| First / Last           | Home / End               | -                                |
-| Page Jump              | PgUp / PgDown            | +/-10                            |
-| Loop Playback          | L                        | Delay set in ribbon              |
-| Toggle Nav Pane        | N                        | Show or hide dock                |
-| Straight Line Paint    | Shift + Drag             | Constrained stroke               |
+| Action                         | Shortcut                 | Notes                                                     |
+| ------------------------------ | ------------------------ | --------------------------------------------------------- |
+| Open Annotation Folder         | Menu                     | File menu                                                 |
+| Open Original Folder           | Menu                     | File menu                                                 |
+| Refresh Folders                | Menu                     | Refreshes the files in annotation folder                  |
+| Select Revise / Move To Folder | Shift + M                | Option to select the folder to move point clouds          |
+| Revise / Move To Folder        | M                        | Moves the point cloud to selected Revise / Move To Folder |
+| Save                           | Ctrl+S                   | Optional bake of enhanced colors                          |
+| Autosave                       | Menu toggle              | File menu                                                 |
+| Undo / Redo                    | Ctrl+Z / Ctrl+Y          | Per-stroke                                                |
+| Annotation Mode                | Ctrl+A                   | Enable brush painting                                     |
+| Show Annotations               | Shift+A                  | Toggle annotation overlay                                 |
+| Eraser                         | E                        | Restores original colors                                  |
+| Repair Mode                    | Shift+R                  | Split view + eraser default                               |
+| Clone Mode                     | C                        | Paint from original colors                                |
+| Brush Size                     | B then +/-               | 1-200 px                                                  |
+| Point Size                     | D then +/-               | 1-20 px                                                   |
+| Annotation Alpha               | A then +/-               | 0-100 percent                                             |
+| Gamma                          | G then +/-               | 0.1x to 3.0x                                              |
+| Zoom                           | Z then +/-               | Cursor-centered zoom                                      |
+| Reset View                     | R                        | Reset camera                                              |
+| Views                          | Ctrl+T/B/F/V/L/R/W/E/I/O | Presets                                                   |
+| Previous / Next                | Left / Right             | Wraps                                                     |
+| First / Last                   | Home / End               | -                                                         |
+| Page Jump                      | PgUp / PgDown            | +/-10                                                     |
+| Loop Playback                  | L                        | Delay set in ribbon                                       |
+| Toggle Nav Pane                | N                        | Show or hide dock                                         |
+| Straight Line Paint            | Shift + Drag             | Constrained stroke                                        |
 
 ---
 
@@ -333,6 +337,10 @@ From the repo root:
 
 ```pwsh
 pyinstaller --noconfirm --onedir --windowed --icon "\python\icons\app.ico" --contents-directory "." --add-data "\python\configs;configs/" --add-data "\python\controllers;controllers/" --add-data "\python\icons;icons/" --add-data "\python\rendering;rendering/" --add-data "\python\services;services/" --add-data "\python\ui;ui/"  "\python\app.py"
+
+With paths:
+
+pyinstaller --noconfirm --onedir --windowed --icon "D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\python\icons\app.ico" --contents-directory "." --add-data "D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\python\configs;configs/" --add-data "D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\python\controllers;controllers/" --add-data "D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\python\icons;icons/" --add-data "D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\python\rendering;rendering/" --add-data "D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\python\services;services/" --add-data "D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\python\tests;tests/" --add-data "D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\python\ui;ui/"  "D:\OneDrive\Education Materials\Applications\Toolboxes\Python\My Functions\Point Cloud Annotator\python\app.py"
 ```
 
 If you add other assets, include them with `--add-data` as needed.
