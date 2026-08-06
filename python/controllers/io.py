@@ -10,7 +10,7 @@ from scipy.spatial import cKDTree
 from vtkmodules.vtkIOPLY import vtkPLYWriter
 
 from services.storage import load_state, log_gui, save_state
-from controllers import app_helpers
+from controllers import app_helpers, review
 
 
 def natural_key(path):
@@ -51,6 +51,8 @@ def open_ann_folder(app) -> None:
         return
     log_gui(f"open_ann_folder: selected={fol}")
 
+    review.reset_for_new_project(app)
+
     app.ann_dir = Path(fol)
     app.directory = app.ann_dir
     app.files = app._get_sorted_files()
@@ -67,6 +69,7 @@ def open_ann_folder(app) -> None:
     app._visited.clear()
     app._annotated.clear()
     app._dirty.clear()
+    app._copied_from_original.clear()
 
     if app._pending_orig_dir is not None:
         cand = app._pending_orig_dir
@@ -126,6 +129,9 @@ def open_orig_folder(app) -> None:
     log_gui(f"open_orig_folder: selected={fol}")
     cand = Path(fol)
     log_gui(f"open_orig_folder: clearing ann_dir ann_dir={app.ann_dir}")
+
+    review.reset_for_new_project(app)
+
     app.ann_dir = None
     app.directory = None
     app.files = []
@@ -135,6 +141,7 @@ def open_orig_folder(app) -> None:
     app._visited.clear()
     app._annotated.clear()
     app._dirty.clear()
+    app._copied_from_original.clear()
 
     app.orig_dir = cand
     app._pending_orig_dir = cand
@@ -324,6 +331,7 @@ def move_current_to_folder(app) -> None:
     app._visited = _remap(app._visited)
     app._annotated = _remap(app._annotated)
     app._dirty = _remap(app._dirty)
+    app._copied_from_original = _remap(app._copied_from_original)
     if getattr(app, "_bad_files", None) is not None:
         app._bad_files = _remap(app._bad_files)
 
@@ -490,6 +498,8 @@ def load_cloud(app) -> None:
     app.update_annotation_visibility()
     app._end_batch()
     app._update_status_bar()
+    app._refresh_review_comment_box()
+    review.record_visit(app)
 
 
 def on_save(app, _autosave: bool = False) -> None:
@@ -510,6 +520,28 @@ def on_save(app, _autosave: bool = False) -> None:
     if choice == QtWidgets.QMessageBox.Yes:
         untouched_mask = ~np.any(save_colors != app.original_colors, axis=1)
         save_colors[untouched_mask] = app.enhanced_colors[untouched_mask]
+
+    # app.colors must match what's actually written to disk — otherwise
+    # anything that diffs app.colors against app.original_colors (Copy
+    # Original Colors, edited-point detection, etc.) keeps comparing
+    # against the pre-merge values and misses the gamma-merged points
+    # until the file is reloaded from disk.
+    app.colors = save_colors
+
+    # The contrast/gamma preview in enhanced_colors is now either baked
+    # into app.colors (Yes) or explicitly declined (No) — either way it's
+    # stale. Reset it to neutral so untouched points render as the true
+    # original again instead of the same enhanced preview forever (which
+    # made Copy Original Colors look like a no-op afterward, since it only
+    # changes app.colors and the "untouched" render always fell back to
+    # this array).
+    app.enhanced_colors = app.original_colors.copy()
+    if hasattr(app, "ribbon_sliders") and "gamma" in app.ribbon_sliders:
+        gamma_slider, gamma_lbl = app.ribbon_sliders["gamma"]
+        gamma_slider.blockSignals(True)
+        gamma_slider.setValue(100)
+        gamma_slider.blockSignals(False)
+        gamma_lbl.setText("1.00")
 
     app.cloud["RGB"] = save_colors
 
@@ -542,3 +574,4 @@ def on_save(app, _autosave: bool = False) -> None:
     app._annotated.add(app.index)
     app._decorate_nav_item(app.index)
     app._update_status_bar()
+    review.record_stats_on_save(app)

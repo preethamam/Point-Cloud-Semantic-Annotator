@@ -33,19 +33,32 @@ from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtGui import QIcon
 
 from configs.constants import (
+    APP_NAME,
     NAV_DOCK_WIDTH,
     NAV_NAME_MAX,
     NAV_THUMB_SIZE,
+    VERSION_NUMBER,
 )
-from services.thumbnail import ThumbnailService
-from controllers import annotation, app_helpers, bootstrap, interaction, io, nav_ui, navigation, ui_controls
+from controllers import (
+    annotation,
+    app_helpers,
+    bootstrap,
+    interaction,
+    io,
+    nav_ui,
+    navigation,
+    review,
+    ui_controls,
+)
 from rendering import camera
-from ui.ribbon import build_ribbon
-from ui.menu import build_menubar
+from services.storage import log_gui
+from services.thumbnail import ThumbnailService
 from ui.icons import (
     icon_clone,
     icon_contrast,
+    icon_copy_arrow,
     icon_eraser,
+    icon_export_excel,
     icon_eye,
     icon_hist,
     icon_loop,
@@ -57,8 +70,12 @@ from ui.icons import (
     icon_reset_contrast,
     icon_reset_view,
     icon_revision,
+    icon_save_comment,
+    icon_textbox,
     icon_zoom,
 )
+from ui.layout import build_ui, install_ribbon_toolbar
+from ui.menu import build_menubar
 from ui.nav_dock import (
     build_nav_dock,
     decorate_nav_item,
@@ -66,8 +83,7 @@ from ui.nav_dock import (
     nav_display_name,
 )
 from ui.overlays import position_overlays
-from ui.layout import build_ui, install_ribbon_toolbar
-from services.storage import log_gui
+from ui.ribbon import build_ribbon
 
 
 def _show_non_blocking_error(title: str, message: str, details: str | None = None) -> None:
@@ -117,7 +133,7 @@ class Annotator(QtWidgets.QMainWindow):
         icon = Path(__file__).parent / 'icons' / 'app.png'
         if not icon.exists(): icon = Path(__file__).parent / 'icons' / 'app.ico'
         if icon.exists(): self.setWindowIcon(QIcon(str(icon)))
-        self.setWindowTitle('Point Cloud Annotator')
+        self.setWindowTitle(f"{APP_NAME}")
 
         bootstrap.bootstrap(self)
 
@@ -187,6 +203,9 @@ class Annotator(QtWidgets.QMainWindow):
 
     def _icon_revision(self):
         return icon_revision(self)
+
+    def _icon_copy_arrow(self):
+        return icon_copy_arrow(self)
 
     def _build_ribbon(self):
         return build_ribbon(self)
@@ -338,6 +357,12 @@ class Annotator(QtWidgets.QMainWindow):
     def show_histograms(self):
         return annotation.show_histograms(self)
 
+    def copy_color_from_original(self, r: int, g: int, b: int):
+        return annotation.copy_color_from_original(self, r, g, b)
+
+    def bulk_copy_colors(self, r: int, g: int, b: int):
+        return annotation.bulk_copy_colors(self, r, g, b)
+
     def set_annotations_visible(self, vis: bool):
         return annotation.set_annotations_visible(self, vis)
 
@@ -476,6 +501,33 @@ class Annotator(QtWidgets.QMainWindow):
 
     def show_about_dialog(self):
         return app_helpers.show_about_dialog(self)
+
+    def _set_ribbon_display_mode(self, mode: str):
+        return app_helpers.set_ribbon_display_mode(self, mode)
+
+    def _icon_textbox(self):
+        return icon_textbox(self)
+
+    def _icon_save_comment(self):
+        return icon_save_comment(self)
+
+    def _icon_export_excel(self):
+        return icon_export_excel(self)
+
+    def toggle_review_textbox(self, on: bool):
+        return review.toggle_review_textbox(self, on)
+
+    def save_comment(self):
+        return review.save_comment(self)
+
+    def export_to_excel(self):
+        return review.export_to_excel(self)
+
+    def _on_review_comment_changed(self):
+        return review.on_review_comment_changed(self)
+
+    def _refresh_review_comment_box(self):
+        return review.refresh_review_comment_box(self)
 
 
 if __name__ == '__main__':

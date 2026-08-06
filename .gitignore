@@ -2,6 +2,8 @@
 Archive/*
 __pycache__/
 installer/pyinstaller.txt
+.vscode
+.claude
 *.pyc
 *.pyo
 

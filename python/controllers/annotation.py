@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 from PyQt5 import QtCore, QtWidgets
 from PyQt5.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap
@@ -10,6 +12,7 @@ import matplotlib
 matplotlib.use("Qt5Agg")
 import matplotlib.pyplot as plt
 from controllers import app_helpers
+from services.storage import log_gui
 
 
 def toggle_annotation(app) -> None:
@@ -250,6 +253,11 @@ def on_click(app, x, y) -> None:
 
     app._session_edited[idx] = True
     app._mark_dirty_once()
+    # Manual painting means the unsaved state is no longer purely a
+    # "copied from Original" result, so drop the special status label.
+    app._copied_from_original.discard(app.index)
+    if hasattr(app, "_update_status_bar"):
+        app._update_status_bar()
     if hasattr(app, "toggle_ann_chk"):
         app.toggle_ann_chk.setEnabled(True)
     if hasattr(app, "act_toggle_annotations"):
@@ -269,6 +277,9 @@ def on_undo(app) -> None:
         app.act_toggle_annotations.setEnabled(True)
     if hasattr(app, "toggle_ann_chk"):
         app.toggle_ann_chk.setEnabled(True)
+    # Provenance of the remaining unsaved edits is ambiguous once you start
+    # undoing, so drop the special "copied from Original" status label.
+    app._copied_from_original.discard(app.index)
     if not np.any(app._session_edited):
         app._dirty.discard(app.index)
         app._decorate_nav_item(app.index)
@@ -278,6 +289,7 @@ def on_undo(app) -> None:
         except Exception:
             pass
     else:
+        app._update_status_bar()
         try:
             app.statusBar().showMessage("Undo: unsaved edits remain", 1500)
         except Exception:
@@ -292,11 +304,13 @@ def on_redo(app) -> None:
     app.history.append((idx, app.colors[idx].copy()))
     app.colors[idx] = cols
     app._session_edited[idx] = True
+    app._copied_from_original.discard(app.index)
     if hasattr(app, "act_toggle_annotations"):
         app.act_toggle_annotations.setEnabled(True)
     if hasattr(app, "toggle_ann_chk"):
         app.toggle_ann_chk.setEnabled(True)
     app._mark_dirty_once()
+    app._update_status_bar()
     try:
         app.statusBar().showMessage("Redo: unsaved edits present", 1500)
     except Exception:
@@ -430,6 +444,277 @@ def show_histograms(app) -> None:
     ax.legend()
     plt.tight_layout()
     plt.show(block=False)
+
+
+def copy_color_from_original(app, r: int, g: int, b: int) -> None:
+    """Copy colors from the Original Point Cloud into the Annotated Point
+    Cloud for every point, except points whose current Annotated color
+    already equals (r, g, b) — those are left untouched."""
+    if not hasattr(app, "colors") or app.colors is None:
+        _show_copy_status(app, "Copy colors: no point cloud is loaded")
+        return
+
+    ignore = np.array([r, g, b], dtype=np.uint8)
+    change_mask = ~np.all(app.colors == ignore, axis=1)
+    idx = np.where(change_mask)[0]
+
+    if idx.size == 0:
+        _show_copy_status(app, "Copy colors: every point already matches the ignore color")
+        return
+
+    old = app.colors[idx].copy()
+    new = app.original_colors[idx]
+    if np.array_equal(old, new):
+        _show_copy_status(app, "Copy colors: no changes needed (already matches Original)")
+        return
+
+    app.history.append((idx, old))
+    app.redo_stack.clear()
+    app.colors[idx] = new
+    app._session_edited[idx] = True
+    app._mark_dirty_once()
+    app._copied_from_original.add(app.index)
+
+    if hasattr(app, "toggle_ann_chk"):
+        app.toggle_ann_chk.setEnabled(True)
+    if hasattr(app, "act_toggle_annotations"):
+        app.act_toggle_annotations.setEnabled(True)
+
+    update_annotation_visibility(app)
+    if hasattr(app, "_update_status_bar"):
+        app._update_status_bar()
+
+    _show_copy_status(
+        app, f"Copied original colors to {idx.size} point(s), ignoring RGB({r}, {g}, {b})"
+    )
+
+
+def _show_copy_status(app, message: str) -> None:
+    try:
+        app.statusBar().showMessage(message, 3000)
+    except Exception:
+        pass
+    if hasattr(app, "sb_anno"):
+        try:
+            app.sb_anno.setToolTip(message)
+        except Exception:
+            pass
+
+
+# Matches copy_color_panel.PANEL_STYLE so the progress dialog reads as part
+# of the same feature instead of a stock OS dialog.
+_BULK_PROGRESS_STYLE = """
+    QProgressDialog {
+        background: #ffffff;
+    }
+    QProgressDialog QLabel {
+        color: #1a1a1a;
+        background: transparent;
+        font-size: 12px;
+    }
+    QProgressBar {
+        background: #f3f4f6;
+        border: 1px solid #d7d7dc;
+        border-radius: 6px;
+        text-align: center;
+        color: #1a1a1a;
+        font-size: 11px;
+        min-height: 18px;
+    }
+    QProgressBar::chunk {
+        background-color: #0078D4;
+        border-radius: 5px;
+    }
+    QProgressDialog QPushButton {
+        background: #f4f4f4;
+        color: #000000;
+        border: 1px solid #d7d7dc;
+        border-radius: 4px;
+        padding: 6px 14px;
+        font-size: 12px;
+    }
+    QProgressDialog QPushButton:hover {
+        background: #e6f1fb;
+        border: 1px solid #0078D4;
+    }
+    QProgressDialog QPushButton:pressed {
+        background: #d7ebfa;
+    }
+    """
+
+
+class BulkCopyWorker(QtCore.QThread):
+    """Runs the 'ignore RGB, copy the rest from Original' merge across many
+    annotation/original file pairs using joblib worker processes, in small
+    batches so progress can be reported back to the GUI between batches."""
+
+    progress = QtCore.pyqtSignal(int, int)
+    results_ready = QtCore.pyqtSignal(list)
+
+    _BATCH_SIZE = 16
+
+    def __init__(self, pairs: list[tuple[str, str]], ignore_rgb: tuple[int, int, int], parent=None):
+        super().__init__(parent)
+        self.pairs = pairs
+        self.ignore_rgb = ignore_rgb
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:
+        from joblib import Parallel, delayed
+
+        from services.bulk_copy import copy_colors_for_file
+
+        results = []
+        total = len(self.pairs)
+        done = 0
+        self.progress.emit(0, total)
+
+        for start in range(0, total, self._BATCH_SIZE):
+            if self._cancel:
+                break
+            batch = self.pairs[start:start + self._BATCH_SIZE]
+            batch_results = Parallel(n_jobs=-1, backend="loky")(
+                delayed(copy_colors_for_file)(ann, orig, self.ignore_rgb)
+                for ann, orig in batch
+            )
+            results.extend(batch_results)
+            done += len(batch)
+            self.progress.emit(done, total)
+
+        self.results_ready.emit(results)
+
+
+def bulk_copy_colors(app, r: int, g: int, b: int) -> None:
+    """Apply the same ignore-RGB / copy-from-Original merge as Single File
+    Copy, but across every annotation file that has a matching Original
+    file, in parallel."""
+    if not app.files or not app.orig_dir:
+        QtWidgets.QMessageBox.information(
+            app, "Bulk Copy",
+            "Open both an Annotation folder and an Original folder first.",
+        )
+        return
+
+    # Flush the currently open file to disk first so the bulk pass sees its
+    # latest in-memory edits instead of a stale on-disk copy.
+    edited = (
+        getattr(app, "_session_edited", None) is not None
+        and np.any(app._session_edited)
+    )
+    if edited:
+        app.on_save(_autosave=True)
+
+    pairs = []
+    skipped_names = []
+    for p in app.files:
+        o = app.orig_dir / p.name
+        if o.exists():
+            pairs.append((str(p), str(o)))
+        else:
+            skipped_names.append(p.name)
+
+    if not pairs:
+        QtWidgets.QMessageBox.information(
+            app, "Bulk Copy",
+            "No annotation files have a matching file in the Original folder.",
+        )
+        return
+
+    msg = (
+        f"This will overwrite {len(pairs)} annotation file(s), copying colors "
+        f"from the Original folder and ignoring RGB({r}, {g}, {b}) "
+        "(points already at that color are left untouched)."
+    )
+    if skipped_names:
+        msg += f"\n\n{len(skipped_names)} file(s) will be skipped (no matching Original file)."
+    msg += "\n\nThis cannot be undone. Continue?"
+
+    choice = QtWidgets.QMessageBox.question(
+        app, "Bulk Copy Original Colors", msg,
+        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+    )
+    if choice != QtWidgets.QMessageBox.Yes:
+        return
+
+    progress_dlg = QtWidgets.QProgressDialog(
+        f"Copying original colors... (0 / {len(pairs)})", "Cancel", 0, len(pairs), app
+    )
+    progress_dlg.setWindowTitle("Bulk Copy")
+    progress_dlg.setWindowModality(QtCore.Qt.WindowModal)
+    progress_dlg.setMinimumDuration(0)
+    progress_dlg.setAutoClose(False)
+    progress_dlg.setAutoReset(False)
+    progress_dlg.setStyleSheet(_BULK_PROGRESS_STYLE)
+    progress_dlg.setMinimumWidth(320)
+    progress_dlg.setValue(0)
+
+    worker = BulkCopyWorker(pairs, (r, g, b), parent=app)
+    app._bulk_copy_worker = worker  # keep a reference alive while it runs
+
+    def _on_progress(done, total):
+        progress_dlg.setMaximum(total)
+        progress_dlg.setLabelText(f"Copying original colors... ({done} / {total})")
+        progress_dlg.setValue(done)
+
+    def _on_results(results):
+        progress_dlg.close()
+        _finish_bulk_copy(app, pairs, results, skipped_names)
+        app._bulk_copy_worker = None
+
+    progress_dlg.canceled.connect(worker.cancel)
+    worker.progress.connect(_on_progress)
+    worker.results_ready.connect(_on_results)
+    worker.start()
+
+
+def _finish_bulk_copy(app, pairs, results, skipped_names) -> None:
+    updated = [r for r in results if r.status == "updated"]
+    unchanged = [r for r in results if r.status == "unchanged"]
+    errors = [r for r in results if r.status == "error"]
+    not_processed = len(pairs) - len(results)
+
+    summary = (
+        f"Bulk copy finished.\n\n"
+        f"Updated: {len(updated)}\n"
+        f"Unchanged (nothing to copy): {len(unchanged)}\n"
+        f"Skipped (no matching Original): {len(skipped_names)}\n"
+        f"Errors: {len(errors)}"
+    )
+    if not_processed:
+        summary += f"\nCancelled before processing: {not_processed}"
+    if errors:
+        preview = "\n".join(f"- {Path(r.path).name}: {r.error}" for r in errors[:10])
+        summary += f"\n\nFirst error(s):\n{preview}"
+        if len(errors) > 10:
+            summary += f"\n... and {len(errors) - 10} more."
+
+    QtWidgets.QMessageBox.information(app, "Bulk Copy Complete", summary)
+
+    log_gui(
+        f"bulk_copy_colors: updated={len(updated)} unchanged={len(unchanged)} "
+        f"skipped={len(skipped_names)} errors={len(errors)} cancelled={not_processed}"
+    )
+
+    if not updated:
+        return
+
+    # Files changed on disk; refresh caches/badges and reload whatever's
+    # currently on screen so the GUI matches what was just written.
+    app.thumbs.new_generation()
+    app.thumbs.prune_ann_thumbs()
+    if hasattr(app, "_scan_annotated_files"):
+        try:
+            app._scan_annotated_files()
+        except Exception:
+            pass
+    if hasattr(app, "_populate_nav_list"):
+        app._populate_nav_list()
+    app.history.clear()
+    app.redo_stack.clear()
+    app.load_cloud()
 
 
 def set_annotations_visible(app, vis: bool) -> None:

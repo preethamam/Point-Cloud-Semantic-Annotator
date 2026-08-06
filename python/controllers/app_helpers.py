@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 import platform
+from datetime import datetime, timezone
 
 from PyQt5 import QtCore, QtWidgets
 
-from configs.constants import VERSION_NUMBER
+from configs.constants import APP_NAME, VERSION_NUMBER
+from controllers import review
 from services.storage import log_gui, save_state
 
 
@@ -52,6 +54,70 @@ def on_change_event(app, event) -> None:
     else:
         if hasattr(app, "act_toggle_nav"):
             app.act_toggle_nav.setChecked(False)
+
+def set_ribbon_display_mode(app, mode: str) -> None:
+    """mode: 'fullscreen' | 'hidden' | 'shown'.
+    'shown' re-docks the ribbon toolbar; anything else detaches it via
+    removeToolBar() rather than just setVisible(False) -- a hidden-but-still
+    -docked QToolBar leaves a residual strip of empty space in
+    QMainWindow's toolbar area, whereas a fully removed one collapses to
+    zero height."""
+    if hasattr(app, "ribbon_tb"):
+        attached = getattr(app, "_ribbon_toolbar_attached", True)
+        if mode == "shown":
+            if not attached:
+                app.addToolBar(QtCore.Qt.TopToolBarArea, app.ribbon_tb)
+            app.ribbon_tb.setVisible(True)
+            app._ribbon_toolbar_attached = True
+        elif attached:
+            app.removeToolBar(app.ribbon_tb)
+            app._ribbon_toolbar_attached = False
+
+    app.statusBar().setVisible(True)
+
+    if mode == "fullscreen":
+        if not app.isFullScreen():
+            app._pre_fullscreen_maximized = bool(app.windowState() & QtCore.Qt.WindowMaximized)
+            app.showFullScreen()
+    elif app.isFullScreen():
+        # Windows can't go directly from a borderless fullscreen surface to
+        # a bordered maximized one; restoring to normal first, in the same
+        # call stack (no event-loop turn in between), avoids Qt getting the
+        # window stuck in a broken in-between geometry.
+        app.showNormal()
+        if getattr(app, "_pre_fullscreen_maximized", True):
+            app.showMaximized()
+
+    app._ribbon_display_mode = mode
+
+    # The toolbar attach/detach and window-state change above both resize
+    # the canvas across more than one layout pass; positioning the overlay
+    # titles or fitting the camera synchronously can use stale, not-yet-
+    # settled widget geometry. Deferring lets Qt finish laying out before
+    # we measure (same fix used elsewhere for this, see
+    # controllers/annotation.py). A second, later pass is a safety net for
+    # the full-screen case, whose OS-level window-state transition can
+    # settle slower than a plain toolbar visibility change.
+    def _refresh_canvas_layout():
+        if hasattr(app, "_position_overlays"):
+            app._position_overlays()
+        if hasattr(app, "_schedule_fit"):
+            app._schedule_fit()
+
+    QtCore.QTimer.singleShot(0, _refresh_canvas_layout)
+    QtCore.QTimer.singleShot(120, _refresh_canvas_layout)
+
+    for attr, attr_mode in (
+        ("act_ribbon_fullscreen", "fullscreen"),
+        ("act_ribbon_hidden", "hidden"),
+        ("act_ribbon_shown", "shown"),
+    ):
+        act = getattr(app, attr, None)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(attr_mode == mode)
+            act.blockSignals(False)
+
 
 def clone_source(app):
     """Color source for Clone mode."""
@@ -202,13 +268,13 @@ def set_points_render_mode(app, on: bool) -> None:
 def show_about_dialog(app) -> None:
     QtWidgets.QMessageBox.about(
         app,
-            "About Point Cloud Annotator",
+            f"About {APP_NAME}",
             f"""
-    <b>Point Cloud Annotator</b><br>
+    <b>{APP_NAME}</b><br>
     Version {VERSION_NUMBER}<br><br>
 
     <b>Description</b><br>
-    Point Cloud Annotator is a professional tool for semantic annotation,
+    {APP_NAME} is a professional tool for semantic annotation,
     repair, and review of large-scale 3D point clouds (PLY / PCD).
     It is designed for high-precision research, industrial inspection,
     and dataset generation workflows.<br><br>
@@ -242,7 +308,7 @@ def show_about_dialog(app) -> None:
     WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
     SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.<br><br>
 
-    © 2026 Preetham Manjunatha. All rights reserved.
+    © {datetime.now(tz=timezone.utc).year} Preetham Manjunatha. All rights reserved.
     """,
     )
 
@@ -281,6 +347,11 @@ def close_event(app, e) -> None:
             "index": int(app.index),
             "nav_dock_width": int(app.nav_dock.width()),
         })
+    except Exception:
+        pass
+
+    try:
+        review.flush_and_save(app)
     except Exception:
         pass
 

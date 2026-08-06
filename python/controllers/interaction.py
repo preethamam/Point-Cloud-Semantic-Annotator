@@ -8,7 +8,33 @@ def event_filter(app, obj, event):
     if getattr(app, "_is_closing", False):
         return False
 
-    is_text_input = isinstance(obj, QtWidgets.QLineEdit)
+    is_text_input = isinstance(obj, (QtWidgets.QLineEdit, QtWidgets.QPlainTextEdit, QtWidgets.QTextEdit))
+
+    if obj is getattr(app, "review_textbox", None):
+        if event.type() == QtCore.QEvent.ShortcutOverride:
+            k = event.key()
+            mods = event.modifiers()
+            if k in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right) and (mods & QtCore.Qt.ShiftModifier):
+                event.accept()
+                return True
+            if k == QtCore.Qt.Key_Escape:
+                # Claim Escape here so the app-wide "show ribbon in
+                # fullscreen" QShortcut doesn't swallow it first; we want
+                # it to just drop focus out of the textbox instead.
+                event.accept()
+                return True
+
+        if event.type() == QtCore.QEvent.KeyPress:
+            k = event.key()
+            if (event.modifiers() & QtCore.Qt.ShiftModifier) and k in (QtCore.Qt.Key_Left, QtCore.Qt.Key_Right):
+                if k == QtCore.Qt.Key_Left:
+                    app.on_prev()
+                else:
+                    app.on_next()
+                return True
+            if k == QtCore.Qt.Key_Escape:
+                app._release_view_combo_focus()
+                return True
 
     if event.type() == QtCore.QEvent.KeyPress:
         if is_text_input:
@@ -179,6 +205,10 @@ def event_filter(app, obj, event):
 
                     app._session_edited[idxs] = True
                     app._mark_dirty_once()
+                    # Manual painting means the unsaved state is no longer
+                    # purely a "copied from Original" result.
+                    app._copied_from_original.discard(app.index)
+                    app._update_status_bar()
                     if hasattr(app, "toggle_ann_chk"):
                         app.toggle_ann_chk.setEnabled(True)
                     if hasattr(app, "act_toggle_annotations"):
@@ -219,6 +249,10 @@ def event_filter(app, obj, event):
 
                     app._session_edited[idxs] = True
                     app._mark_dirty_once()
+                    # Manual painting means the unsaved state is no longer
+                    # purely a "copied from Original" result.
+                    app._copied_from_original.discard(app.index)
+                    app._update_status_bar()
                     if hasattr(app, "toggle_ann_chk"):
                         app.toggle_ann_chk.setEnabled(True)
                     if hasattr(app, "act_toggle_annotations"):

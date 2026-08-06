@@ -4,11 +4,12 @@ from pathlib import Path
 
 from appdirs import user_data_dir
 
-APP_NAME = "Point Cloud Annotator"
-VERSION_NUMBER = "2.4.0"
+APP_NAME = "Point Cloud Annotator & Reviewer"
+VERSION_NUMBER = "2.5.0"
 
 STATE_DIR = Path(user_data_dir(APP_NAME, appauthor=False))
 STATE_FILE = STATE_DIR / "state.json"
+REVIEW_FILE = STATE_DIR / "review.json"
 THUMB_DIR = STATE_DIR / "thumbs"
 
 THUMB_SIZE = 96   # pixels (safe, fast, clean)

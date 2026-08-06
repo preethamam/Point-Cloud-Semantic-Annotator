@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import QShortcut
 
 from configs.constants import NAV_DOCK_WIDTH, NAV_NAME_MAX, NAV_THUMB_SIZE, NAV_FAST_THRESHOLD, NAV_FAST_ICON_BATCH
 from services.storage import load_state, log_gui, save_state
-from controllers import app_helpers
+from controllers import app_helpers, review
 from services.thumbnail import ThumbnailService
 
 
@@ -84,6 +84,7 @@ def init_state(app) -> None:
     app._visited = set()
     app._annotated = set()
     app._dirty = set()
+    app._copied_from_original = set()
 
     app._fit_delay_ms = 33
 
@@ -287,6 +288,7 @@ def finalize_startup(app) -> None:
 def bootstrap(app) -> None:
     init_actions(app)
     init_state(app)
+    review.init_review_state(app)
     init_timers(app)
     build_ui(app)
     init_status_bar(app)

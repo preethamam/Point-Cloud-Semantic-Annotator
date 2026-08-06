@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from controllers import review
+
 
 def maybe_autosave_before_nav(app) -> None:
     if app.act_autosave.isChecked():
@@ -11,6 +13,12 @@ def maybe_autosave_before_nav(app) -> None:
         )
         if edited:
             app.on_save(_autosave=True)
+
+    # Snapshot the file we're about to leave (comment + live edit state)
+    # in memory so its review.json/Excel row reflects what was actually
+    # done to it, not just whatever it looked like when first loaded.
+    review.on_review_comment_changed(app)
+    review.record_visit(app)
 
 
 def _reload_after_nav(app) -> None:

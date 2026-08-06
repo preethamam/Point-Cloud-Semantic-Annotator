@@ -169,3 +169,8 @@ def decorate_nav_item(app, idx: int) -> None:
 
     dot_dirty.setVisible(idx in app._dirty)
     dot_annot.setVisible(idx in app._annotated)
+    # The thumbnail image label lives in a QStackedLayout inside the same
+    # container and can re-stack itself on top on relayout, visually
+    # burying these dots even though they're correctly set visible.
+    dot_dirty.raise_()
+    dot_annot.raise_()

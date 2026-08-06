@@ -4,6 +4,7 @@ from PyQt5 import QtCore, QtWidgets
 from joblib import Parallel, delayed
 
 from services.annotation_state import is_annotated_pair
+from services.annotation_stats import annotation_status_label
 from services.storage import load_nav_dock_width
 
 
@@ -273,17 +274,11 @@ def update_status_bar(app) -> None:
     else:
         app.sb_index.setText("")
 
-    is_dirty = app.index in getattr(app, "_dirty", set())
-    is_annot = app.index in getattr(app, "_annotated", set())
-    if is_dirty:
-        app.sb_anno.setText("Modified")
-    elif is_annot:
-        app.sb_anno.setText("Annotated")
+    label = annotation_status_label(app)
+    if label == "Clean" and app.thumbs.pending_count() > 0:
+        app.sb_anno.setText("Processing Thumbnails.")
     else:
-        if app.thumbs.pending_count() > 0:
-            app.sb_anno.setText("Processing Thumbnails.")
-        else:
-            app.sb_anno.setText("Clean")
+        app.sb_anno.setText(label)
 
     if app.act_loop.isChecked():
         app.sb_loop.setText(f"Looping ({app.loop_delay_sec:.1f} s)")

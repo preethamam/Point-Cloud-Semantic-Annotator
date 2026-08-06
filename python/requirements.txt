@@ -8,3 +8,4 @@ matplotlib
 appdirs
 joblib
 Pillow
+openpyxl

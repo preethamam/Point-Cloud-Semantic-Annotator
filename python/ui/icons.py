@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 from PyQt5 import QtCore, QtWidgets
-from PyQt5.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PyQt5.QtGui import QColor, QIcon, QImage, QPainter, QPen, QPixmap
 
 
 def _make_icon(size, draw_fn):
@@ -16,11 +17,40 @@ def _make_icon(size, draw_fn):
     return QIcon(pix)
 
 
+def _trim_transparent(pix: QPixmap) -> QPixmap:
+    """Crop away fully-transparent padding around an icon's glyph, so
+    source assets with built-in margins render at the same visual size
+    as the hand-drawn icons (which already fill their canvas edge to edge)."""
+    img = pix.toImage().convertToFormat(QImage.Format_RGBA8888)
+    w, h = img.width(), img.height()
+    if w == 0 or h == 0:
+        return pix
+
+    ptr = img.bits()
+    ptr.setsize(h * img.bytesPerLine())
+    stride = img.bytesPerLine() // 4
+    arr = np.frombuffer(ptr, dtype=np.uint8).reshape((h, stride, 4))[:, :w, :]
+
+    opaque = arr[:, :, 3] > 0
+    rows = np.any(opaque, axis=1)
+    cols = np.any(opaque, axis=0)
+    if not rows.any() or not cols.any():
+        return pix
+
+    top, bottom = np.where(rows)[0][[0, -1]]
+    left, right = np.where(cols)[0][[0, -1]]
+    cropped = img.copy(int(left), int(top), int(right - left + 1), int(bottom - top + 1))
+    return QPixmap.fromImage(cropped)
+
+
 def _icon_from_file(filename):
     icon_path = Path(__file__).resolve().parent.parent / "icons" / filename
     if not icon_path.exists():
         return None
-    icon = QIcon(str(icon_path))
+    pix = QPixmap(str(icon_path))
+    if pix.isNull():
+        return None
+    icon = QIcon(_trim_transparent(pix))
     if icon.isNull():
         return None
     return icon
@@ -202,3 +232,38 @@ def icon_revision(app):
     if icon is not None:
         return icon
     return app.style().standardIcon(QtWidgets.QStyle.SP_DriveFDIcon)
+
+
+def icon_copy_arrow(app):
+    icon = _icon_from_file("copy-arrow.png")
+    if icon is not None:
+        return icon
+
+    def draw(p, s):
+        p.setPen(QPen(QColor("#2b2b2b"), 1.5, QtCore.Qt.SolidLine,
+                      QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+        p.drawLine(2, 8, 12, 8)
+        p.drawLine(8, 4, 12, 8)
+        p.drawLine(8, 12, 12, 8)
+    return _make_icon(16, draw)
+
+
+def icon_textbox(app):
+    icon = _icon_from_file("textbox.png")
+    if icon is not None:
+        return icon
+    return app.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView)
+
+
+def icon_save_comment(app):
+    icon = _icon_from_file("save-comment.png")
+    if icon is not None:
+        return icon
+    return app.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)
+
+
+def icon_export_excel(app):
+    icon = _icon_from_file("export-excel.png")
+    if icon is not None:
+        return icon
+    return app.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)

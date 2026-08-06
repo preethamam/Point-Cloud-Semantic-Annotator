@@ -6,6 +6,8 @@ from PyQt5 import QtCore, QtWidgets, QtGui
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QToolButton
 
+from ui import copy_color_panel
+
 
 class RibbonGroup(QtWidgets.QFrame):
     """
@@ -138,7 +140,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     chk_loop.toggled.connect(app.act_loop.setChecked)
     app.act_loop.toggled.connect(chk_loop.setChecked)
     
-    btn_revision = _ribbon_button(app._icon_revision(), "Revise / Move To Folder (M)")
+    btn_revision = _ribbon_button(app._icon_revision(), "Revise / Move To Folder (Ctrl+M)")
     btn_revision.clicked.connect(app.move_current_to_folder)
 
     delay = QtWidgets.QLineEdit()
@@ -171,8 +173,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     btn_delay_menu.setPopupMode(QToolButton.InstantPopup)
     btn_delay_menu.setFixedSize(24, 22)
 
-    delay_menu = QtWidgets.QMenu(btn_delay_menu)
-    delay_menu.setStyleSheet("""
+    dropdown_menu_style = """
         QMenu {
             background-color: #f4f4f4;
             color: #222;
@@ -186,7 +187,10 @@ def build_ribbon(app) -> QtWidgets.QWidget:
             background-color: #d0e7ff;
             color: #222;
         }
-        """)
+        """
+
+    delay_menu = QtWidgets.QMenu(btn_delay_menu)
+    delay_menu.setStyleSheet(dropdown_menu_style)
 
     def _set_delay(val):
         val = float(val)
@@ -202,17 +206,16 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     delay_menu.addSeparator()
 
     def _custom_delay():
-        val, ok = QtWidgets.QInputDialog.getDouble(
-            app,
-            "Loop Delay",
-            "Seconds:",
-            app.loop_delay_sec,
-            0.1,
-            60.0,
-            1,
-        )
-        if ok:
-            _set_delay(val)
+        dlg = QtWidgets.QInputDialog(app)
+        dlg.setWindowFlags(dlg.windowFlags() & ~QtCore.Qt.WindowContextHelpButtonHint)
+        dlg.setWindowTitle("Loop Delay")
+        dlg.setLabelText("Seconds:")
+        dlg.setInputMode(QtWidgets.QInputDialog.DoubleInput)
+        dlg.setDoubleRange(0.1, 60.0)
+        dlg.setDoubleDecimals(1)
+        dlg.setDoubleValue(app.loop_delay_sec)
+        if dlg.exec_() == QtWidgets.QDialog.Accepted:
+            _set_delay(dlg.doubleValue())
 
     act_custom = QtWidgets.QAction("Custom.", app)
     act_custom.triggered.connect(_custom_delay)
@@ -443,6 +446,29 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     btn_hist = _ribbon_button(app._icon_hist(), "Show histograms", icon_size=16, button_size=24)
     btn_hist.clicked.connect(app.show_histograms)
 
+    btn_copy = _ribbon_button(
+        app._icon_copy_arrow(), "Copy original point cloud colors",
+        icon_size=16, button_size=24,
+    )
+    btn_copy.setPopupMode(QToolButton.InstantPopup)
+    btn_copy.setStyleSheet(btn_copy.styleSheet() + """
+        QToolButton::menu-indicator {
+            image: none;
+            width: 0px;
+            height: 0px;
+        }
+    """)
+
+    copy_menu = QtWidgets.QMenu(btn_copy)
+    copy_menu.setStyleSheet(copy_color_panel.MENU_STYLE)
+
+    copy_widget = copy_color_panel.build_copy_color_widget(app, on_applied=copy_menu.close)
+
+    copy_action = QtWidgets.QWidgetAction(copy_menu)
+    copy_action.setDefaultWidget(copy_widget)
+    copy_menu.addAction(copy_action)
+    btn_copy.setMenu(copy_menu)
+
     enh.add_row("Gamma (G +/-)", s_gamma, app.ribbon_gamma_label)
     app.ribbon_sliders["gamma"] = (s_gamma, app.ribbon_gamma_label)
     enh_row = QtWidgets.QWidget()
@@ -452,6 +478,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     enh_row_layout.addWidget(btn_auto)
     enh_row_layout.addWidget(btn_reset)
     enh_row_layout.addWidget(btn_hist)
+    enh_row_layout.addWidget(btn_copy)
     enh.add(enh_row)
 
     view = RibbonGroup("View", 195, title_position="bottom")
@@ -460,7 +487,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     view.grid.setAlignment(QtCore.Qt.AlignTop)
     # Height alignment is handled after layout is assembled.
 
-    btn_reset = _ribbon_button(app._icon_reset_view(), "Reset view (R)")
+    btn_reset = _ribbon_button(app._icon_reset_view(), "Reset view (Ctrl+Shift+V)")
     btn_reset.clicked.connect(app.reset_view)
 
     btn_zoom_in = _ribbon_button(app._icon_zoom(True), "Zoom in")
@@ -518,6 +545,31 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     view.add(spacer)
     view.add(cmb_view)
 
+    review = RibbonGroup("Review", 125, title_position="bottom")
+    review.setSizePolicy(QtWidgets.QSizePolicy.Fixed, QtWidgets.QSizePolicy.Fixed)
+    review.controls.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding)
+    review.grid.setAlignment(QtCore.Qt.AlignTop)
+
+    btn_show_textbox = _ribbon_button(app._icon_textbox(), "Show review textbox (Ctrl+Shift+T)", checkable=True, icon_size=16, button_size=24)
+    btn_show_textbox.setChecked(app.act_show_review_textbox.isChecked())
+    btn_show_textbox.toggled.connect(app.act_show_review_textbox.setChecked)
+    app.act_show_review_textbox.toggled.connect(btn_show_textbox.setChecked)
+
+    btn_save_comment = _ribbon_button(app._icon_save_comment(), "Save comment", icon_size=16, button_size=24)
+    btn_save_comment.clicked.connect(app.save_comment)
+
+    btn_export_excel = _ribbon_button(app._icon_export_excel(), "Export to Excel", icon_size=16, button_size=24)
+    btn_export_excel.clicked.connect(app.export_to_excel)
+
+    review_row = QtWidgets.QWidget()
+    review_row_layout = QtWidgets.QHBoxLayout(review_row)
+    review_row_layout.setContentsMargins(0, 0, 0, 0)
+    review_row_layout.setSpacing(2)
+    review_row_layout.addWidget(btn_show_textbox)
+    review_row_layout.addWidget(btn_save_comment)
+    review_row_layout.addWidget(btn_export_excel)
+    review.add(review_row)
+
     nav_edit = QtWidgets.QWidget()
     nav_edit_layout = QtWidgets.QVBoxLayout(nav_edit)
     nav_edit_layout.setContentsMargins(0, 0, 0, 0)
@@ -526,7 +578,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     nav_edit_layout.addWidget(edit)
 
     h.addWidget(nav_edit, 0, QtCore.Qt.AlignTop)
-    for grp in (ann, col, enh, view):
+    for grp in (ann, col, enh, view, review):
         h.addWidget(grp, 0, QtCore.Qt.AlignTop)
 
     nav_edit.adjustSize()
@@ -536,6 +588,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
         col.sizeHint().height(),
         enh.sizeHint().height(),
         view.sizeHint().height(),
+        review.sizeHint().height(),
     )
     if target_height > 0:
         nav_height = nav.sizeHint().height()
@@ -543,7 +596,7 @@ def build_ribbon(app) -> QtWidgets.QWidget:
         edit_height = max(0, target_height - nav_height - spacing)
         edit.setFixedHeight(edit_height)
         nav_edit.setFixedHeight(target_height)
-        for grp in (ann, col, enh, view):
+        for grp in (ann, col, enh, view, review):
             grp.setFixedHeight(target_height)
 
     h.addStretch(1)

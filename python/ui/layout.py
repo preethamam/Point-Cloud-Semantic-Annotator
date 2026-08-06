@@ -3,6 +3,8 @@ from __future__ import annotations
 from PyQt5 import QtCore, QtWidgets
 from pyvistaqt import QtInteractor
 
+from ui.review_panel import build_review_panel
+
 
 def install_ribbon_toolbar(app) -> None:
     """Put the ribbon in QMainWindow's toolbar area so docks sit below it."""
@@ -33,9 +35,19 @@ def build_ui(app) -> None:
     w = QtWidgets.QWidget(app)
     app.setCentralWidget(w)
 
-    lay = QtWidgets.QHBoxLayout(w)
+    outer = QtWidgets.QVBoxLayout(w)
+    outer.setContentsMargins(0, 0, 0, 0)
+    outer.setSpacing(0)
+
+    canvas = QtWidgets.QWidget()
+    lay = QtWidgets.QHBoxLayout(canvas)
     lay.setContentsMargins(0, 0, 0, 0)
     lay.setSpacing(0)
+    outer.addWidget(canvas, 1)
+
+    app.review_panel = build_review_panel(app)
+    app.review_panel.setVisible(False)
+    outer.addWidget(app.review_panel, 0)
 
     app.plotter_ref = QtInteractor(app)
     app.plotter_ref.set_background("white")
