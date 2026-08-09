@@ -1,6 +1,6 @@
 # Point Cloud Annotator & Reviewer
 
-Semantic color annotation, review, and reporting tool for PLY/PCD point clouds. Version 2.0.0 introduced a modular architecture, a ribbon-first UI, dual-view repair/clone workflows, thumbnail-based navigation, and a precise WYSIWYG brush that respects screen-space point size. Version 2.5.0 builds a full review layer on top of that: per-file comments, automatically captured annotation statistics, one-click Excel reporting, a "copy original colors" tool with both single-file and folder-wide bulk modes, and Word-style ribbon display modes.
+Semantic color annotation, review, and reporting tool for PLY/PCD point clouds. Version 2.0.0 introduced a modular architecture, a ribbon-first UI, dual-view repair/clone workflows, thumbnail-based navigation, and a precise WYSIWYG brush that respects screen-space point size. Version 2.5.0 builds a full review layer on top of that: per-file comments, automatically captured annotation statistics, one-click Excel reporting, a "copy original colors" tool with both single-file and folder-wide bulk modes, and Word-style ribbon display modes. Version 2.6.0 rounds out the review layer with a cumulative (append) mode that carries review data across folders and runs, plus one-click clear/restore backed by automatic, rotating backups.
 
 ![overview](assets/overview_01.png)
 ![overview](assets/overview_02.png)
@@ -13,7 +13,7 @@ Semantic color annotation, review, and reporting tool for PLY/PCD point clouds. 
 ## Table of Contents
 
 1. Overview
-2. What is New in 2.5.0
+2. What is New
 3. Feature Matrix
 4. Folder Structure
 5. Installation
@@ -48,7 +48,18 @@ Two goals drive the design throughout: **accurate brush footprints** that match 
 
 ---
 
-## 2. What is New in 2.5.0
+## 2. What is New
+
+### 2.6.0
+
+- New **Append Review Data (Cumulative)** toggle (Review ribbon group and **Review** menu). When on, review data — comments and stats — keeps accumulating across folders and app runs instead of resetting each time you open a new annotation folder; when off (the default), switching folders starts the review log over. The setting is remembered between sessions.
+- New **Clear Review Data** action (Review ribbon group and **Review** menu): a deliberate, confirmed wipe of the entire review record. A timestamped backup is written first, so an accidental clear is always recoverable.
+- New **Restore Review Data** action (Review ribbon group and **Review** menu): pick a saved backup from a list and roll the review log back to it. The current data is backed up before the restore, so a restore is itself undoable.
+- Automatic, rotating **review backups** in the app data dir: a one-deep `review.prev.json` snapshot taken right before an off-mode auto-reset, plus a rotating `review_backups/` folder (the last 10 backups kept) written before every manual clear or restore.
+- The **Show Review Textbox** panel state is now persisted, so the comment panel reopens shown or hidden exactly as you left it on the previous run.
+- New review ribbon icons for the append, clear, and restore actions, and a second row in the **Review** ribbon group to hold them.
+
+### 2.5.0
 
 - App renamed to **Point Cloud Annotator & Reviewer** (v2.5.0) to reflect the new review/reporting capabilities alongside annotation.
 - New **Review** ribbon group and **Review** menu: a toggleable per-file comment textbox (`Ctrl+Shift+T`), **Save Comment**, and **Export to Excel**.
@@ -88,7 +99,7 @@ Two goals drive the design throughout: **accurate brush footprints** that match 
 | Navigation  | Previous/Next, loop playback, quick index or filename search                                     |
 | Thumbnails  | Background generation, cache, and annotated/dirty indicators                                     |
 | Enhancement | Gamma slider, auto contrast, RGB histogram viewer, copy original colors (single file or bulk)    |
-| Review      | Per-file comments, auto-saved review log, annotation/class statistics, one-click Excel export    |
+| Review      | Per-file comments, auto-saved review log, class stats, Excel export, cumulative mode, backups    |
 | Display     | Adjustable point size, overlay titles, annotation alpha, full-screen / hide-ribbon display modes |
 | Persistence | Remembers folders, index, and nav dock width                                                     |
 
@@ -149,6 +160,8 @@ Point Cloud Annotator/
 │     ├─ app.png
 │     ├─ app.ico
 │     ├─ annotate.png
+│     ├─ append-json.png
+│     ├─ clear-review.png
 │     ├─ clone.png
 │     ├─ contrast.png
 │     ├─ copy-arrow.png
@@ -161,6 +174,7 @@ Point Cloud Annotator/
 │     ├─ repair.png
 │     ├─ reset.png
 │     ├─ reset-contrast.png
+│     ├─ restore-json.png
 |     ├─ revision.png
 │     ├─ save-comment.png
 │     ├─ textbox.png
@@ -237,7 +251,7 @@ If an original file exists and matches point count, its RGB values are treated a
 - Edit: annotation mode, eraser, repair, clone
 - Enhancement: gamma slider, auto contrast, histograms, copy original point cloud colors (single file or bulk)
 - View: reset view, zoom, view presets, show annotations
-- Review: show/hide review textbox, save comment, export to Excel
+- Review: show/hide review textbox, save comment, export to Excel; append (cumulative) mode toggle, clear review data, restore review data
 
 ### 8.2 Navigation Dock
 
@@ -274,6 +288,8 @@ Press `Ctrl+Shift+T` (or use **Review → Show Review Textbox**, or the ribbon's
 
 `Shift+Left` / `Shift+Right` navigate to the previous/next file even while the comment box has keyboard focus, so review notes and navigation can be done without leaving the keyboard.
 
+The panel's shown/hidden state is remembered between sessions, so it reopens exactly as you left it on the previous run.
+
 ### 9.2 Annotation Stats Captured
 
 Each time stats are recorded for a file (on save, or when saving a comment), the app snapshots:
@@ -301,6 +317,28 @@ All comments and stats snapshots are stored keyed by absolute annotation file pa
 3. **Session Info** — the `review.json` meta block (app name, version, generated-at, total entries).
 
 The save dialog defaults to `<annotation-folder-name>_review.xlsx` in the last folder you exported to (or the annotation folder on first use), and requires the `openpyxl` package — already listed in `requirements.txt`. If it's missing, the app shows an install hint instead of failing silently.
+
+### 9.5 Cumulative (Append) Mode
+
+`review.json` is a single file keyed by absolute annotation file path. By default the review log is **per project**: when you open a different annotation folder, the log starts over so entries (and every future Excel export) aren't a mix of every folder you've ever touched.
+
+Toggle **Append Review Data (Cumulative)** — in the **Review** ribbon group or the **Review** menu — to change that:
+
+- **Off (default).** Opening a new annotation folder resets the review log. A one-deep snapshot is written first (see [9.6](#96-backups-clearing-and-restoring)) so the immediately-prior state can still be recovered.
+- **On.** The review log is never reset on a folder switch; comments and stats keep accumulating across folders and across app runs. In this mode the record is only ever destroyed deliberately, via **Clear Review Data**.
+
+The toggle is remembered between sessions, and the ribbon button and menu item stay in sync with each other.
+
+### 9.6 Backups, Clearing, and Restoring
+
+The review log is protected by automatic backups so a reset or a mistaken wipe is recoverable:
+
+- **`review.prev.json`** — a single one-deep snapshot taken right before an off-mode auto-reset (the routine folder-switch case). It is overwritten each reset rather than rotated, so ordinary folder switches don't pile up backup files while the last-cleared state stays recoverable.
+- **`review_backups/`** — a rotating folder of timestamped backups (the most recent 10 kept) written before every manual **Clear Review Data** and before every **Restore Review Data**.
+
+**Clear Review Data** (Review ribbon group or **Review** menu) permanently empties the review log after a confirmation prompt that reports how many file entries will be removed. It writes a timestamped backup first and shows a brief toast when done.
+
+**Restore Review Data** (Review ribbon group or **Review** menu) lists the available snapshots — the rotating backups plus the one-deep auto-reset snapshot — each labeled with its timestamp and entry count, newest first. Pick one and confirm to replace the current log with it. The current data is backed up before the restore, so a restore is itself undoable via another restore.
 
 ---
 
@@ -378,6 +416,9 @@ Applies the same ignore-color merge across **every annotation file that has a ma
 | Show Review Textbox              | Ctrl+Shift+T             | Toggles the per-file comment panel                          |
 | Save Comment                     | Ribbon / Menu            | Review group or Review menu; also snapshots stats           |
 | Export to Excel                  | Ribbon / Menu            | Review group or Review menu                                 |
+| Append Review Data               | Ribbon / Menu            | Cumulative mode; keeps entries across folders/runs          |
+| Clear Review Data                | Ribbon / Menu            | Wipes review log (timestamped backup first)                 |
+| Restore Review Data              | Ribbon / Menu            | Restore review log from a saved backup                      |
 | Navigate While Commenting        | Shift + Left / Right     | Works even while the review textbox has focus               |
 | Full-screen / Hide / Show Ribbon | Chevron menu (top-right) | Word-style ribbon display options                           |
 | Exit Full-screen                 | Esc                      | Returns to Always Show Ribbon mode                          |
@@ -448,7 +489,7 @@ Optional original folder:
 
 Stored via `appdirs.user_data_dir`:
 
-- `state.json` contains the last annotation folder, original folder, file index, nav dock width, and last Excel export directory.
+- `state.json` contains the last annotation folder, original folder, file index, nav dock width, last Excel export directory, the review append (cumulative) mode toggle, and the Show Review Textbox panel state.
 
 ### 14.2 Thumbnail Cache
 
@@ -460,14 +501,16 @@ Stored via `appdirs.user_data_dir`:
 
 - `review.json`, stored alongside `state.json` in the same app data directory, holds every file's comment and latest annotation-stats snapshot (see [9.3 The Review Log](#93-the-review-log-reviewjson)).
 - Loaded once at startup (`ReviewStore.load`) and written incrementally throughout the session; a final flush happens on application close.
-- Not cleared by "Clear Thumbnail Cache" — it is independent of the thumbnail cache and persists across sessions and folder changes.
+- Not cleared by "Clear Thumbnail Cache" — it is independent of the thumbnail cache and persists across sessions.
+- With append (cumulative) mode **off** (the default), opening a different annotation folder resets `review.json`; with it **on**, entries persist across folder changes and runs (see [9.5 Cumulative (Append) Mode](#95-cumulative-append-mode)).
+- Protected by automatic backups in the same directory: a one-deep `review.prev.json` snapshot before an off-mode auto-reset, and a rotating `review_backups/` folder (last 10 kept) written before every manual clear or restore (see [9.6 Backups, Clearing, and Restoring](#96-backups-clearing-and-restoring)).
 
 ---
 
 ## 15. Architecture and Module Map
 
 - `python/app.py`: Entry point and main `Annotator` window
-- `python/controllers/`: Interaction, painting, navigation, I/O, and review (`review.py`)
+- `python/controllers/`: Interaction, painting, navigation, I/O, and review (`review.py` — comments, stats capture, append/cumulative mode, and clear/restore with backups)
 - `python/ui/`: Ribbon, menus, navigation dock, overlays, review panel (`review_panel.py`), and the copy-colors popup (`copy_color_panel.py`)
 - `python/rendering/`: Camera control and view synchronization
 - `python/services/`: State storage, thumbnail generation, annotation detection, annotation statistics (`annotation_stats.py`), the review log store (`review_store.py`), Excel export (`excel_export.py`), and the picklable per-file worker for Bulk Copy (`bulk_copy.py`)
@@ -527,7 +570,10 @@ Q: How do I adjust auto-contrast percentiles?
 A: Edit `apply_auto_contrast` in `python/controllers/annotation.py`.
 
 Q: Where is my review data stored, and can I back it up?
-A: In `review.json`, in the same per-user app data directory as `state.json` (see [14.3 Review Log](#143-review-log)). Copy that file to back it up or move it between machines.
+A: In `review.json`, in the same per-user app data directory as `state.json` (see [14.3 Review Log](#143-review-log)). Copy that file to back it up or move it between machines. The app also keeps its own rotating backups in `review_backups/` and a one-deep `review.prev.json` next to it, which **Restore Review Data** reads from.
+
+Q: My review comments disappeared after I opened a different annotation folder — how do I keep them?
+A: By default the review log is per project, so switching folders starts it over. Turn on **Append Review Data (Cumulative)** in the Review ribbon group or Review menu to keep entries across folders and runs. To get back the log you just lost, use **Restore Review Data** and pick the most recent snapshot (see [9.6 Backups, Clearing, and Restoring](#96-backups-clearing-and-restoring)).
 
 Q: Does Copy Original Point Cloud Colors overwrite my hand-painted annotations?
 A: Only for points that don't match the ignore color you set. Set the ignore color to whatever class you want to protect, and everything else reverts to the original.

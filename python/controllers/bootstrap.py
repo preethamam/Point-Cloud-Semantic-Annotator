@@ -280,6 +280,7 @@ def restore_state(app) -> None:
 def finalize_startup(app) -> None:
     app.showMaximized()
     QtCore.QTimer.singleShot(0, app._restore_nav_width)
+    review.restore_show_textbox(app)
 
     if app.files:
         app.load_cloud()

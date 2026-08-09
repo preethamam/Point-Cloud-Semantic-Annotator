@@ -311,6 +311,10 @@ def move_current_to_folder(app) -> None:
         )
         return
 
+    # Keep any review entry pointing at the file's new location so its
+    # comment/stats follow the move instead of becoming an orphan key.
+    review.rekey_on_move(app, str(src), str(dest), filename=dest.name)
+
     old_files = list(app.files)
     old_index = app.index
 
@@ -352,6 +356,20 @@ def move_current_to_folder(app) -> None:
     if app.files:
         app.load_cloud()
         app._position_overlays()
+    else:
+        # The last point cloud was just moved out, so nothing remains to
+        # load. Clear both canvases and drop the stale cloud state; without
+        # this the previously loaded cloud stays displayed on the canvas.
+        app.plotter.clear()
+        app.plotter_ref.clear()
+        for _attr in (
+            "cloud", "cloud_ref", "colors", "original_colors",
+            "enhanced_colors", "actor", "actor_ref", "kdtree",
+        ):
+            if hasattr(app, _attr):
+                delattr(app, _attr)
+        app.plotter.render()
+        app.plotter_ref.render()
 
     save_state({
         "annotation_dir": str(app.ann_dir or ""),

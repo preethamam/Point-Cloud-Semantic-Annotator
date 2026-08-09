@@ -54,6 +54,8 @@ from rendering import camera
 from services.storage import log_gui
 from services.thumbnail import ThumbnailService
 from ui.icons import (
+    icon_append_json,
+    icon_clear_review,
     icon_clone,
     icon_contrast,
     icon_copy_arrow,
@@ -69,6 +71,7 @@ from ui.icons import (
     icon_repair,
     icon_reset_contrast,
     icon_reset_view,
+    icon_restore_json,
     icon_revision,
     icon_save_comment,
     icon_textbox,
@@ -514,8 +517,29 @@ class Annotator(QtWidgets.QMainWindow):
     def _icon_export_excel(self):
         return icon_export_excel(self)
 
+    def _icon_append_json(self):
+        return icon_append_json(self)
+
+    def _icon_clear_review(self):
+        return icon_clear_review(self)
+
+    def _icon_restore_json(self):
+        return icon_restore_json(self)
+
     def toggle_review_textbox(self, on: bool):
         return review.toggle_review_textbox(self, on)
+
+    def _is_review_append_mode(self) -> bool:
+        return review.is_append_mode(self)
+
+    def _toggle_review_append_mode(self, on: bool):
+        return review.set_append_mode(self, on)
+
+    def clear_review_data(self):
+        return review.clear_review_data(self)
+
+    def restore_review_data(self):
+        return review.restore_review_data(self)
 
     def save_comment(self):
         return review.save_comment(self)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from configs.constants import (
     DEBUG_GUI_LOG,
@@ -13,6 +15,15 @@ from configs.constants import (
 )
 
 STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write via temp file + os.replace so a crash mid-write can't truncate
+    the target file (see review_store._atomic_write_text)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 _GUI_LOGGER = None
 
@@ -58,7 +69,7 @@ def load_state() -> dict:
             org = state.get("original_dir", "")
             if ann and org:
                 state["project_pairs"] = {ann: org}
-                STATE_FILE.write_text(json.dumps(state))
+                _atomic_write_text(STATE_FILE, json.dumps(state))
         return state
     except Exception:
         return {}
@@ -68,7 +79,7 @@ def save_state(updates: dict) -> None:
     try:
         state = load_state()
         state.update(updates)
-        STATE_FILE.write_text(json.dumps(state))
+        _atomic_write_text(STATE_FILE, json.dumps(state))
     except Exception:
         pass
 

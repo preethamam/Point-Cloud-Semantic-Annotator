@@ -11,6 +11,7 @@ SUMMARY_COLUMNS = [
     ("filename", "Filename"),
     ("status", "Status"),
     ("annotation_path", "Annotation Path"),
+    ("file_exists", "File Exists"),
     ("original_path", "Original Path"),
     ("point_count", "Point Count"),
     ("annotated_point_count", "Annotated Points"),
@@ -44,6 +45,19 @@ def _format_cell(val):
     return val
 
 
+def _cell_value(entry: dict, field: str):
+    # "file_exists" is computed fresh at export time rather than stored, so
+    # it never goes stale: in cumulative mode a file moved/renamed/deleted
+    # outside the app shows "No" here instead of silently misleading.
+    if field == "file_exists":
+        path = entry.get("annotation_path", "")
+        try:
+            return "Yes" if path and Path(path).exists() else "No"
+        except Exception:
+            return "?"
+    return _format_cell(entry.get(field, ""))
+
+
 def _bold_header(ws) -> None:
     for cell in ws[1]:
         cell.font = cell.font.copy(bold=True)
@@ -66,7 +80,7 @@ def export_review_to_excel(review_json_path: Path, dest_path: Path) -> int:
     _bold_header(ws)
     for key in sorted_keys:
         e = entries[key]
-        ws.append([_format_cell(e.get(field, "")) for field, _ in SUMMARY_COLUMNS])
+        ws.append([_cell_value(e, field) for field, _ in SUMMARY_COLUMNS])
     for i in range(1, len(SUMMARY_COLUMNS) + 1):
         ws.column_dimensions[get_column_letter(i)].width = 18
 

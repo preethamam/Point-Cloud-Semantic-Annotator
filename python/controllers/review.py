@@ -1,26 +1,235 @@
 from __future__ import annotations
 
+import json
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 from PyQt5 import QtCore, QtWidgets
 
-from configs.constants import REVIEW_FILE
+from configs.constants import (
+    REVIEW_BACKUP_DIR,
+    REVIEW_BACKUP_KEEP,
+    REVIEW_FILE,
+    REVIEW_PREV_FILE,
+)
 from services import annotation_stats
 from services.review_store import ReviewStore
 from services.storage import load_state, log_gui, save_state
 
+APPEND_MODE_KEY = "review_append_mode"
+SHOW_TEXTBOX_KEY = "show_review_textbox"
+
 
 def init_review_state(app) -> None:
     app.review_store = ReviewStore.load(REVIEW_FILE)
+    # Persisted append/cumulative toggle. A missing or non-boolean value
+    # degrades to OFF (today's per-project behavior), so a corrupt state
+    # file can never wedge review recording.
+    try:
+        app._review_append_mode = bool(load_state().get(APPEND_MODE_KEY, False))
+    except Exception:
+        app._review_append_mode = False
+
+
+def is_append_mode(app) -> bool:
+    return bool(getattr(app, "_review_append_mode", False))
+
+
+def restore_show_textbox(app) -> None:
+    """Re-apply the persisted Show Review Textbox state on startup. Setting
+    the action's checked state drives toggle_review_textbox (and keeps the
+    ribbon button in sync), so the panel shows/hides to match the last run.
+    Called after the menu, ribbon and review panel are built."""
+    if not hasattr(app, "act_show_review_textbox"):
+        return
+    try:
+        on = bool(load_state().get(SHOW_TEXTBOX_KEY, False))
+    except Exception:
+        on = False
+    app.act_show_review_textbox.setChecked(on)
+
+
+def _prune_backups(keep: int) -> None:
+    try:
+        backups = sorted(REVIEW_BACKUP_DIR.glob("review_*.json"))
+        for old in backups[:-keep] if keep > 0 else backups:
+            try:
+                old.unlink()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def _backup_review_file(reason: str) -> Path | None:
+    """Copy the current review.json to a timestamped, rotating backup before
+    any destructive operation, so an accidental clear is always recoverable."""
+    try:
+        if not REVIEW_FILE.exists():
+            return None
+        REVIEW_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest = REVIEW_BACKUP_DIR / f"review_{ts}.json"
+        shutil.copy2(REVIEW_FILE, dest)
+        _prune_backups(REVIEW_BACKUP_KEEP)
+        log_gui(f"review backup: reason={reason} dest={dest}")
+        return dest
+    except Exception as exc:
+        log_gui(f"review backup failed: {exc}")
+        return None
+
+
+def _snapshot_prev() -> None:
+    """One-deep undo snapshot written right before an OFF-mode auto-wipe.
+    Overwritten each reset (not rotated) so routine folder switches don't
+    spam backup files, while the immediately-prior state stays recoverable."""
+    try:
+        if REVIEW_FILE.exists():
+            shutil.copy2(REVIEW_FILE, REVIEW_PREV_FILE)
+    except Exception:
+        pass
+
+
+def set_append_mode(app, on: bool) -> None:
+    app._review_append_mode = bool(on)
+    save_state({APPEND_MODE_KEY: bool(on)})
+    log_gui(f"review append mode: {'on' if on else 'off'}")
 
 
 def reset_for_new_project(app) -> None:
     """Start review.json over when the user picks a different annotation
     folder. review.json is a single file keyed by absolute file path, so
     without this, entries from every past project stay mixed into it
-    (and into every future Excel export) forever."""
+    (and into every future Excel export) forever.
+
+    When append (cumulative) mode is on this is a no-op: entries keep
+    accumulating across folders and sessions. Destroying the record is then
+    only ever done deliberately via clear_review_data()."""
+    if is_append_mode(app):
+        return
+    if app.review_store.entries:
+        _snapshot_prev()
     app.review_store = ReviewStore()
     app.review_store.save(REVIEW_FILE)
+
+
+def clear_review_data(app) -> None:
+    """Deliberate, confirmed wipe of the cumulative review record. Backs the
+    file up first so an accidental clear can be recovered."""
+    n = len(app.review_store.entries)
+    reply = QtWidgets.QMessageBox.question(
+        app,
+        "Clear Review Data",
+        (
+            f"This permanently clears all review data ({n} file "
+            f"entr{'y' if n == 1 else 'ies'}: comments and stats).\n\n"
+            "A timestamped backup is saved first so this can be undone from\n"
+            f"{REVIEW_BACKUP_DIR}\n\nContinue?"
+        ),
+        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        QtWidgets.QMessageBox.No,
+    )
+    if reply != QtWidgets.QMessageBox.Yes:
+        return
+
+    backup = _backup_review_file("manual clear")
+    app.review_store = ReviewStore()
+    app.review_store.save(REVIEW_FILE)
+    refresh_review_comment_box(app)
+    log_gui(f"clear_review_data: cleared={n} backup={backup}")
+    _show_toast(app, "Review data cleared" + (" (backup saved)" if backup else ""))
+
+
+def _entry_count(path: Path) -> int:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return len(data.get("entries", {}) or {})
+    except Exception:
+        return 0
+
+
+def _backup_candidates() -> list[tuple[str, Path]]:
+    """(label, path) pairs for restorable snapshots, most recent first: the
+    rotating pre-clear/pre-restore backups plus the one-deep auto-wipe
+    snapshot. Labels carry the filename so they stay unique."""
+    items: list[tuple[float, str, Path]] = []
+
+    def _add(path: Path, tag: str) -> None:
+        try:
+            mtime = path.stat().st_mtime
+        except Exception:
+            mtime = 0.0
+        when = (
+            datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+            if mtime else "unknown"
+        )
+        n = _entry_count(path)
+        label = f"{when}  |  {n} entr{'y' if n == 1 else 'ies'}{tag}  [{path.name}]"
+        items.append((mtime, label, path))
+
+    try:
+        for p in REVIEW_BACKUP_DIR.glob("review_*.json"):
+            _add(p, "")
+    except Exception:
+        pass
+    if REVIEW_PREV_FILE.exists():
+        _add(REVIEW_PREV_FILE, "  (last auto-cleared)")
+
+    items.sort(key=lambda t: t[0], reverse=True)
+    return [(label, path) for _, label, path in items]
+
+
+def restore_review_data(app) -> None:
+    """Restore review.json from a saved backup. The current data is backed
+    up first, so a restore is itself undoable via another restore."""
+    candidates = _backup_candidates()
+    if not candidates:
+        QtWidgets.QMessageBox.information(
+            app, "Restore Review Data",
+            f"No review backups found in\n{REVIEW_BACKUP_DIR}",
+        )
+        return
+
+    labels = [label for label, _ in candidates]
+    choice, ok = QtWidgets.QInputDialog.getItem(
+        app, "Restore Review Data",
+        "Choose a backup to restore (current data is backed up first):",
+        labels, 0, False,
+    )
+    if not ok or not choice:
+        return
+    src = next(path for label, path in candidates if label == choice)
+
+    restored = ReviewStore.load(src)
+    n = len(restored.entries)
+    reply = QtWidgets.QMessageBox.question(
+        app, "Restore Review Data",
+        f"Replace the current review data with this backup "
+        f"({n} entr{'y' if n == 1 else 'ies'})?\n\n{src.name}",
+        QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+        QtWidgets.QMessageBox.No,
+    )
+    if reply != QtWidgets.QMessageBox.Yes:
+        return
+
+    _backup_review_file("pre-restore")
+    app.review_store = restored
+    app.review_store.save(REVIEW_FILE)
+    refresh_review_comment_box(app)
+    log_gui(f"restore_review_data: src={src} entries={n}")
+    _show_toast(app, f"Restored {n} entr{'y' if n == 1 else 'ies'}")
+
+
+def rekey_on_move(app, old_path: str, new_path: str, *, filename: str | None = None) -> None:
+    """Keep a review entry pointing at its file after an in-app move, so the
+    comment/stats aren't orphaned. Persists only if something actually moved."""
+    try:
+        if app.review_store.rekey(old_path, new_path, filename=filename):
+            app.review_store.save(REVIEW_FILE)
+            log_gui(f"review rekey: {old_path} -> {new_path}")
+    except Exception as exc:
+        log_gui(f"review rekey failed: {exc}")
 
 
 def _current_key(app):
@@ -54,6 +263,9 @@ def on_review_comment_changed(app) -> None:
 def toggle_review_textbox(app, on: bool) -> None:
     if hasattr(app, "review_panel"):
         app.review_panel.setVisible(bool(on))
+
+    # Persist so the panel's shown/hidden state carries across app runs.
+    save_state({SHOW_TEXTBOX_KEY: bool(on)})
 
     def _refresh_canvas_layout():
         # setVisible() only queues the layout change; the plotter

@@ -561,14 +561,40 @@ def build_ribbon(app) -> QtWidgets.QWidget:
     btn_export_excel = _ribbon_button(app._icon_export_excel(), "Export to Excel", icon_size=16, button_size=24)
     btn_export_excel.clicked.connect(app.export_to_excel)
 
-    review_row = QtWidgets.QWidget()
-    review_row_layout = QtWidgets.QHBoxLayout(review_row)
-    review_row_layout.setContentsMargins(0, 0, 0, 0)
-    review_row_layout.setSpacing(2)
-    review_row_layout.addWidget(btn_show_textbox)
-    review_row_layout.addWidget(btn_save_comment)
-    review_row_layout.addWidget(btn_export_excel)
-    review.add(review_row)
+    # These three source PNGs are already trimmed tight, but their glyphs are
+    # portrait (~0.8 aspect) and lighter-weight line art, so at icon_size=16
+    # they read much smaller than the dense, near-square row-1 icons. Render
+    # them at 22px (same 24px button) so their on-screen weight matches.
+    btn_append_review = _ribbon_button(
+        app._icon_append_json(),
+        "Append review data (cumulative across folders and runs)",
+        checkable=True, icon_size=18, button_size=24,
+    )
+    btn_append_review.setChecked(app.act_append_review.isChecked())
+    btn_append_review.toggled.connect(app.act_append_review.setChecked)
+    app.act_append_review.toggled.connect(btn_append_review.setChecked)
+
+    btn_clear_review = _ribbon_button(app._icon_clear_review(), "Clear review data", icon_size=18, button_size=24)
+    btn_clear_review.clicked.connect(app.clear_review_data)
+
+    btn_restore_review = _ribbon_button(app._icon_restore_json(), "Restore review data", icon_size=18, button_size=24)
+    btn_restore_review.clicked.connect(app.restore_review_data)
+
+    def _review_row(*buttons):
+        row = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        # Equal stretch before every button and after the last one spreads
+        # them evenly across the row instead of clustering them at the left.
+        for b in buttons:
+            layout.addStretch(1)
+            layout.addWidget(b)
+        layout.addStretch(1)
+        return row
+
+    review.add(_review_row(btn_show_textbox, btn_save_comment, btn_export_excel))
+    review.add(_review_row(btn_append_review, btn_clear_review, btn_restore_review))
 
     nav_edit = QtWidgets.QWidget()
     nav_edit_layout = QtWidgets.QVBoxLayout(nav_edit)

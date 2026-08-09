@@ -5,11 +5,16 @@ from pathlib import Path
 from appdirs import user_data_dir
 
 APP_NAME = "Point Cloud Annotator & Reviewer"
-VERSION_NUMBER = "2.5.0"
+VERSION_NUMBER = "2.6.0"
 
 STATE_DIR = Path(user_data_dir(APP_NAME, appauthor=False))
 STATE_FILE = STATE_DIR / "state.json"
 REVIEW_FILE = STATE_DIR / "review.json"
+# One-deep undo snapshot taken right before an OFF-mode auto-wipe, and a
+# rotating stash of timestamped backups written before a manual clear.
+REVIEW_PREV_FILE = STATE_DIR / "review.prev.json"
+REVIEW_BACKUP_DIR = STATE_DIR / "review_backups"
+REVIEW_BACKUP_KEEP = 10
 THUMB_DIR = STATE_DIR / "thumbs"
 
 THUMB_SIZE = 96   # pixels (safe, fast, clean)

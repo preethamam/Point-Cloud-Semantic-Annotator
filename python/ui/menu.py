@@ -264,6 +264,27 @@ def build_menubar(app) -> None:
     app.act_export_excel.triggered.connect(app.export_to_excel)
     review_menu.addAction(app.act_export_excel)
 
+    review_menu.addSeparator()
+
+    app.act_append_review = QtWidgets.QAction("Append Review Data (Cumulative)", app, checkable=True)
+    app.act_append_review.setToolTip(
+        "When on, review data (comments + stats) keeps accumulating across "
+        "folders and app runs instead of resetting on each new folder."
+    )
+    # Reflect the persisted value before wiring the handler so restoring the
+    # checkbox at startup doesn't trigger a redundant state write.
+    app.act_append_review.setChecked(app._is_review_append_mode())
+    app.act_append_review.toggled.connect(app._toggle_review_append_mode)
+    review_menu.addAction(app.act_append_review)
+
+    app.act_clear_review = QtWidgets.QAction("Clear Review Data", app)
+    app.act_clear_review.triggered.connect(app.clear_review_data)
+    review_menu.addAction(app.act_clear_review)
+
+    app.act_restore_review = QtWidgets.QAction("Restore Review Data", app)
+    app.act_restore_review.triggered.connect(app.restore_review_data)
+    review_menu.addAction(app.act_restore_review)
+
     help_menu = menubar.addMenu("&Help")
 
     act_about = QtWidgets.QAction("About", app)

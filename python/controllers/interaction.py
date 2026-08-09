@@ -59,6 +59,22 @@ def event_filter(app, obj, event):
             app._waiting = "gamma"
             return True
 
+        if event.key() == QtCore.Qt.Key_R and not (
+            event.modifiers()
+            & (
+                QtCore.Qt.ControlModifier
+                | QtCore.Qt.AltModifier
+                | QtCore.Qt.MetaModifier
+            )
+        ):
+            # Consume 'R' before VTK's interactor sees it. VTK's default
+            # 'r' resets the camera along the current view direction, which
+            # dollies the cloud backwards; route to the app's own reset so
+            # 'R' matches the Reset View button.
+            if getattr(app, "cloud", None) is not None:
+                app.reset_view()
+            return True
+
     if event.type() == QtCore.QEvent.KeyRelease:
         if is_text_input:
             return False

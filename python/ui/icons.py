@@ -267,3 +267,24 @@ def icon_export_excel(app):
     if icon is not None:
         return icon
     return app.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton)
+
+
+def icon_append_json(app):
+    icon = _icon_from_file("append-json.png")
+    if icon is not None:
+        return icon
+    return app.style().standardIcon(QtWidgets.QStyle.SP_FileDialogDetailedView)
+
+
+def icon_clear_review(app):
+    icon = _icon_from_file("clear-review.png")
+    if icon is not None:
+        return icon
+    return app.style().standardIcon(QtWidgets.QStyle.SP_TrashIcon)
+
+
+def icon_restore_json(app):
+    icon = _icon_from_file("restore-json.png")
+    if icon is not None:
+        return icon
+    return app.style().standardIcon(QtWidgets.QStyle.SP_DialogResetButton)
